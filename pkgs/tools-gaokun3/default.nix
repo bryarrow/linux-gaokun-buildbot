@@ -8,7 +8,7 @@
   glib,
   gdk-pixbuf,
   dconf,
-  wrapGAppsHook,
+  wrapGAppsHook4,
   gobject-introspection,
 }: let
   python = python3.withPackages (ps: [ps.pygobject3]);
@@ -20,7 +20,7 @@ in
     src = ../../tools;
 
     nativeBuildInputs = [
-      wrapGAppsHook
+      wrapGAppsHook4
       gobject-introspection
     ];
 
