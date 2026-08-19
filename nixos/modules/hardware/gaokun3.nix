@@ -128,8 +128,14 @@ in {
     # and the plain NVMe root needs no initrd TPM; otherwise the modules-closure
     # shrink fails on the missing module.
     boot.initrd.systemd.tpm2.enable = false;
+    # ath11k's probe synchronously request_module()s the QRTR family
+    # (net-pf-42) from an async workqueue while qrtr.ko depends on ath11k and
+    # mhi. When qrtr is not already loaded the modprobe chain can wedge the
+    # module machinery in S-state for minutes, stalling the firewall service
+    # and the udev event storm. Load the family before ath11k_pci.
     boot.extraModprobeConfig = ''
       softdep pinctrl_sc8280xp_lpass_lpi pre: lpasscc_sc8280xp
+      softdep ath11k_pci pre: qrtr
     '';
 
     # The Fedora image's patch-nvm-bdaddr.service rewrites
