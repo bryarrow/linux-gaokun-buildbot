@@ -166,6 +166,15 @@ in {
       };
     };
 
+    # pstore crash records live in the DT ramoops region (dts
+    # ramoops@d0000000) and appear as files once the pstore filesystem is
+    # mounted; systemd-pstore then dumps them to /var/lib/systemd/pstore on
+    # the boot after a crash.
+    fileSystems."/sys/fs/pstore" = {
+      device = "pstore";
+      fsType = "pstore";
+    };
+
     # Portrait panel: mutter reads this system-level file in every session, so
     # first-boot setup, the login screen and later accounts all come out
     # rotated. A user choosing rotation in Settings writes
