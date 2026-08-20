@@ -5,6 +5,7 @@ from gi.repository import Adw, GLib, Gtk, Pango
 import glob
 import os
 import pwd
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -364,6 +365,7 @@ class TunerWindow(Gtk.Window):
         self._mode_buttons = {}
         self._updating = False
         self._mode_hint = None
+        self._write_child = None
 
         self._overlay = Adw.ToastOverlay()
         self._root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
@@ -842,34 +844,55 @@ class TunerWindow(Gtk.Window):
                 "WAYLAND_DISPLAY",
                 "XDG_RUNTIME_DIR",
                 "DBUS_SESSION_BUS_ADDRESS",
+                "LANG",
+                "LC_ALL",
+                "GI_TYPELIB_PATH",
+                "PYTHONPATH",
+                "XDG_DATA_DIRS",
+                "GSETTINGS_SCHEMA_DIR",
+                "GIO_EXTRA_MODULES",
+                "LD_LIBRARY_PATH",
             ]
             env_args = [f"{k}={v}" for k in passthrough if (
                 v := os.environ.get(k))]
             ready_file = Path(tempfile.gettempdir()) / \
                 f"gaokun-touchscreen-tuner-ready-{uuid.uuid4().hex}"
-            cmd = [
-                "pkexec", "env", *env_args,
-                sys.executable, os.path.abspath(
-                    __file__), "--write-enabled", "--ready-file", str(ready_file),
-            ]
-            subprocess.Popen(cmd, start_new_session=True)
+            launcher = shutil.which("touchscreen-tune")
+            if launcher:
+                argv = [launcher, "--write-enabled",
+                        "--ready-file", str(ready_file)]
+            else:
+                argv = [sys.executable, os.path.abspath(__file__),
+                        "--write-enabled", "--ready-file", str(ready_file)]
+            self._write_child = subprocess.Popen(
+                ["pkexec", "env", *env_args, *argv],
+                start_new_session=True,
+            )
             self._wait_for_write_ready(ready_file)
         except Exception as err:
             self.show_toast(
                 t("err_generic", name=t("btn_enable_edit"), err=err))
 
     def _wait_for_write_ready(self, ready_file):
+        start = GLib.get_monotonic_time()
+
         def poll():
             if ready_file.exists():
                 self.close()
                 return False
-            if GLib.get_monotonic_time() - started_at > 20 * 1_000_000:
+            child = self._write_child
+            if child is not None and child.poll() is not None:
                 self.show_toast(
-                    t("err_generic", name=t("btn_enable_edit"), err="启动超时"))
+                    t("err_generic", name=t("btn_enable_edit"),
+                      err="提权子进程启动失败（请检查 polkit 认证代理）"))
+                return False
+            if GLib.get_monotonic_time() - start > 60 * 1_000_000:
+                self.show_toast(
+                    t("err_generic", name=t("btn_enable_edit"),
+                      err="认证超时（请确认已完成授权弹窗）"))
                 return False
             return True
 
-        started_at = GLib.get_monotonic_time()
         GLib.timeout_add(200, poll)
 
     def _announce_write_ready(self):
