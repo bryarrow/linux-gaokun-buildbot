@@ -181,6 +181,44 @@ in {
     # ~/.config/monitors.xml, which takes precedence.
     environment.etc."xdg/monitors.xml".source = ../../../tools/image-assets/etc/xdg/monitors.xml;
 
+    # The skin-temp sensor (thermal_zone11, from pmk8280_adc_tm) and the EC
+    # are known to fail and the machine has sudden power-off history. Log
+    # thermal and power-supply state periodically so crashes can be checked
+    # against temperature and charger state afterwards.
+    systemd.services.gaokun3-monitor = {
+      description = "Log gaokun3 thermal and power-supply state";
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "gaokun3-monitor" ''
+          thermal=""
+          for z in /sys/class/thermal/thermal_zone*; do
+            t="$(cat "$z/type" 2>/dev/null)" || t="?"
+            v="$(cat "$z/temp" 2>/dev/null)" || v="unreadable"
+            thermal="$thermal $t=$v"
+          done
+          power=""
+          for s in /sys/class/power_supply/*/; do
+            [ -d "$s" ] || continue
+            name="$(basename "$s")"
+            type="$(cat "$s/type" 2>/dev/null)" || type="?"
+            status="$(cat "$s/status" 2>/dev/null)" || status="?"
+            cap="$(cat "$s/capacity" 2>/dev/null)" || cap="?"
+            power="$power $name($type,$status,$cap%)"
+          done
+          echo "gaokun3-monitor: thermal:[$thermal] power:[$power]"
+        '';
+      };
+    };
+
+    systemd.timers.gaokun3-monitor = {
+      wantedBy = ["timers.target"];
+      timerConfig = {
+        OnBootSec = "1min";
+        OnUnitActiveSec = "5min";
+        Persistent = true;
+      };
+    };
+
     environment.sessionVariables.ALSA_CONFIG_UCM2 = "${ucm2Dir}";
 
     environment.systemPackages = [tools];
