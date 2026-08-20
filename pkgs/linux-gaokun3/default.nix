@@ -10,7 +10,7 @@
   # forward explicitly instead.
   ...
 }@args: let
-  version = "7.2.0-rc2";
+  version = "7.2.0";
 
   # The patch series is git format-patch output; mkDerivation applies them with
   # `patch -p1` in list order, the same content `git am` applies on the CI side.
@@ -27,8 +27,8 @@
     inherit version;
 
     src = fetchurl {
-      url = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/snapshot/v7.2-rc2.tar.gz";
-      sha256 = "1xgz858gjbfczcgrrdrzyf9rndd7n5b9xiy2x22vxl46cjs12awm";
+      url = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/snapshot/v7.2.tar.gz";
+      sha256 = "sha256-iUkYRaotMYa3RTTrUehSailwLqOYyR+N4soJGQU1la0=";
     };
 
     patches = patchFiles "upstream" ++ patchFiles "others";
@@ -54,7 +54,7 @@ in
       pname = "linux-gaokun3";
       inherit version src;
 
-      # kernel.release is "7.2.0-rc2" + CONFIG_LOCALVERSION="-gaokun3".
+      # kernel.release is "7.2.0" + CONFIG_LOCALVERSION="-gaokun3".
       modDirVersion = "${version}-gaokun3";
       defconfig = "gaokun3_defconfig";
       # gaokun3_defconfig is an independent distribution kernel policy (the
