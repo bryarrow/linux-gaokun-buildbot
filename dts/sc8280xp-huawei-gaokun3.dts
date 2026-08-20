@@ -218,6 +218,19 @@
 			reusable;
 			linux,cma-default;
 		};
+
+		/* Crash dump region for pstore/ramoops. Above the simple-framebuffer
+		 * (0xc6200000 + 16 MiB) and all firmware reserved regions (max
+		 * 0xc50fffff), so it survives a warm reset and the kernel can
+		 * capture the tail of console output on oops/panic. */
+		ramoops@d0000000 {
+			compatible = "ramoops";
+			reg = <0x0 0xd0000000 0x0 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x40000>;
+			ftrace-size = <0x0>;
+			pmsg-size = <0x0>;
+		};
 	};
 
 	thermal-zones {
