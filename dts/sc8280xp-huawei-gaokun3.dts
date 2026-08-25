@@ -234,46 +234,25 @@
 	};
 
 	thermal-zones {
-		skin-temp-thermal {
+		ec-temp1-thermal {
+			polling-delay = <1000>;
 			polling-delay-passive = <250>;
 
-			thermal-sensors = <&pmk8280_adc_tm 5>;
+			thermal-sensors = <&gaokun_ec 0>;
 
 			trips {
-				skin_temp_alert0: trip-point0 {
-					temperature = <55000>;
-					hysteresis = <1000>;
+				ec_temp1_passive: trip-point0 {
+					temperature = <90000>;
+					hysteresis = <5000>;
 					type = "passive";
-				};
-
-				skin_temp_alert1: trip-point1 {
-					temperature = <58000>;
-					hysteresis = <1000>;
-					type = "passive";
-				};
-
-				skin-temp-crit {
-					temperature = <73000>;
-					hysteresis = <1000>;
-					type = "critical";
 				};
 			};
 
 			cooling-maps {
 				map0 {
-					trip = <&skin_temp_alert0>;
-					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
-				};
-
-				map1 {
-					trip = <&skin_temp_alert1>;
-					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
-							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					trip = <&ec_temp1_passive>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
+							 <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -700,9 +679,10 @@
 
 	status = "okay";
 
-	embedded-controller@38 {
+	gaokun_ec: embedded-controller@38 {
 		compatible = "huawei,gaokun3-ec";
 		reg = <0x38>;
+		#thermal-sensor-cells = <1>;
 
 		interrupts-extended = <&pdc 215 IRQ_TYPE_LEVEL_LOW>;
 		enable-gpios = <&tlmm 173 GPIO_ACTIVE_HIGH>;
