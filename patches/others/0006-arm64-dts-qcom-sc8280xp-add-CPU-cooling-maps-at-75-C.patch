@@ -1,0 +1,261 @@
+From 7345928cbf8f0bbcc14c38165a4800c0339d8717 Mon Sep 17 00:00:00 2001
+From: scratch <scratch@local>
+Date: Tue, 25 Aug 2026 20:03:11 +0800
+Subject: [PATCH 1/2] arm64: dts: qcom: sc8280xp: add CPU cooling maps at 75 C
+
+Every cpuN-thermal zone in sc8280xp.dtsi has a single 110 degC critical
+trip and nothing else, so the CPUs run flat out until the thermal core
+hits that trip and the kernel performs an emergency shutdown. There is
+no gradual throttling anywhere in between. That is reachable on a
+passively cooled machine: on a Huawei MateBook E Go (fanless 12.35"
+tablet, no vents) a long gaming session has nothing standing between it
+and an abrupt power-off.
+
+Add a passive trip at 75 degC to each of the eight per-core zones and
+bind it to the cpufreq cooling device of that core's own cluster.
+All eight CPU nodes already declare #cooling-cells = <2>, so nothing
+else is needed. 75 C matches the cooling policy used by the gaokun
+Android kernel instead of the 85 C gpu-thermal value this started from.
+
+Each map lists all four CPUs of the cluster, which is the idiom sm8250
+and friends use: cpufreq cooling registers one device per policy, and
+the thermal core picks whichever of the listed nodes owns it.
+
+polling-delay-passive = <250> mirrors gpu-thermal so step_wise can
+react. The 0-3 / 4-7 cluster split is confirmed on hardware: policy0
+tops out at 2.44 GHz and policy4 at 2.69 GHz.
+
+Based-on-patch-by: gaokun-android contributors <nekovahiru@gmail.com>
+Signed-off-by: gaokun-android contributors <nekovahiru@gmail.com>
+
+diff --git a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi b/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
+index b563abb4c..702380b71 100644
+--- a/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
++++ b/arch/arm64/boot/dts/qcom/sc8280xp.dtsi
+@@ -6911,9 +6911,27 @@ sound: sound {
+ 
+ 	thermal-zones {
+ 		cpu0-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 1>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu0_alert0>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu0_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6923,9 +6941,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu1-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 2>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu1_alert0>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu1_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6935,9 +6971,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu2-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 3>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu2_alert0>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu2_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6947,9 +7001,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu3-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 4>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu3_alert0>;
++					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu3_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6959,9 +7031,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu4-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 5>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu4_alert0>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu4_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6971,9 +7061,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu5-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 6>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu5_alert0>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu5_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6983,9 +7091,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu6-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 7>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu6_alert0>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu6_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+@@ -6995,9 +7121,27 @@ cpu-crit {
+ 		};
+ 
+ 		cpu7-thermal {
++			polling-delay-passive = <250>;
++
+ 			thermal-sensors = <&tsens0 8>;
+ 
++			cooling-maps {
++				map0 {
++					trip = <&cpu7_alert0>;
++					cooling-device = <&cpu4 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu5 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu6 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>,
++							 <&cpu7 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
++				};
++			};
++
+ 			trips {
++				cpu7_alert0: trip-point0 {
++					temperature = <75000>;
++					hysteresis = <2000>;
++					type = "passive";
++				};
++
+ 				cpu-crit {
+ 					temperature = <110000>;
+ 					hysteresis = <1000>;
+-- 
+2.55.0
+

@@ -3,3 +3,5 @@
 0003-drm-msm-dpu-fix-dsc-timing-width-truncation.patch
 0004-drm-panel-himax-hx83121a-add-backlight-regulator.patch
 0005-platform-arm64-huawei-gaokun-ec-set-wakeup-source-property.patch
+0006-arm64-dts-qcom-sc8280xp-add-CPU-cooling-maps-at-75-C.patch
+0007-platform-arm64-huawei-gaokun-ec-register-hwmon-as-thermal-sensor.patch
