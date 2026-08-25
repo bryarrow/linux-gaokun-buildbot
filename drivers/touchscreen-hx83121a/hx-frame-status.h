@@ -57,4 +57,3 @@ hx_parse_master_frame_status(const hx_frame_u8 *buf, size_t len,
 }
 
 #endif /* HX_FRAME_STATUS_H */
-2.53.0
