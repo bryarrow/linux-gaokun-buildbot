@@ -34,7 +34,7 @@
       sha256 = "sha256-iUkYRaotMYa3RTTrUehSailwLqOYyR+N4soJGQU1la0=";
     };
 
-    patches = patchFiles "upstream" ++ patchFiles "others";
+    patches = patchFiles "upstream" ++ patchFiles "others" ++ patchFiles "himax";
 
     postPatch = ''
       cp ${../../dts}/*.dts ${../../dts}/*.dtsi arch/arm64/boot/dts/qcom/
