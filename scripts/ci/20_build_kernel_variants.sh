@@ -67,6 +67,7 @@ mkdir -p "$WORKDIR"
 configure_git_identity "$KERN_SRC"
 git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/upstream/*.patch
 git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/others/*.patch
+git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/himax/*.patch
 import_local_sources "$GAOKUN_DIR" "$KERN_SRC"
 
 ccache -z || true

@@ -14,9 +14,12 @@
 
   # The patch series is git format-patch output; mkDerivation applies them with
   # `patch -p1` in list order, the same content `git am` applies on the CI side.
+  # Each directory also carries a `series` file that is not a patch itself.
   patchFiles = dir:
     builtins.map (n: "${../../patches}/${dir}/${n}") (
-      builtins.sort builtins.lessThan (builtins.attrNames (builtins.readDir ../../patches/${dir}))
+      builtins.filter (n: n != "series") (
+        builtins.sort builtins.lessThan (builtins.attrNames (builtins.readDir ../../patches/${dir}))
+      )
     );
 
   # dts/ and defconfig/ are owned outright by this repository (not diffs against

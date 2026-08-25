@@ -1,0 +1,5959 @@
+From 308d1f64a72f6c73404a64d508fdeca12fc72747 Mon Sep 17 00:00:00 2001
+From: pgs666 <74764545+pgs666@users.noreply.github.com>
+Date: Mon, 24 Aug 2026 10:30:00 +0800
+Subject: [PATCH] Input: touchscreen: sync restructured Himax HX83121A driver
+
+Import the complete split driver layout from EGoTouchRev-Linux, including hardware, sysfs, preprocessing, detection, resolution, tracking, resume qualification, performance improvements, and optional full-rate diagnostics.
+
+Source revision: dd96c8e
+---
+ drivers/input/touchscreen/Kconfig             |  28 +
+ drivers/input/touchscreen/Makefile            |   4 +
+ drivers/input/touchscreen/himax-spi-core.c    | 801 ++++++++++++++++
+ drivers/input/touchscreen/himax-spi-hw.c      | 906 ++++++++++++++++++
+ drivers/input/touchscreen/himax-spi-sysfs.c   | 684 +++++++++++++
+ drivers/input/touchscreen/himax-spi.h         | 192 ++++
+ drivers/input/touchscreen/hx-algo-detect.c    | 751 +++++++++++++++
+ drivers/input/touchscreen/hx-algo-internal.h  |  23 +
+ .../input/touchscreen/hx-algo-preprocess.c    | 479 +++++++++
+ drivers/input/touchscreen/hx-algo-resolve.c   | 310 ++++++
+ drivers/input/touchscreen/hx-algo-track.c     | 699 ++++++++++++++
+ drivers/input/touchscreen/hx-algo.c           | 455 +++++++++
+ drivers/input/touchscreen/hx-algo.h           | 440 +++++++++
+ drivers/input/touchscreen/hx-frame-status.h   |  59 ++
+ 14 files changed, 5831 insertions(+)
+ create mode 100644 drivers/input/touchscreen/himax-spi-core.c
+ create mode 100644 drivers/input/touchscreen/himax-spi-hw.c
+ create mode 100644 drivers/input/touchscreen/himax-spi-sysfs.c
+ create mode 100644 drivers/input/touchscreen/himax-spi.h
+ create mode 100644 drivers/input/touchscreen/hx-algo-detect.c
+ create mode 100644 drivers/input/touchscreen/hx-algo-internal.h
+ create mode 100644 drivers/input/touchscreen/hx-algo-preprocess.c
+ create mode 100644 drivers/input/touchscreen/hx-algo-resolve.c
+ create mode 100644 drivers/input/touchscreen/hx-algo-track.c
+ create mode 100644 drivers/input/touchscreen/hx-algo.c
+ create mode 100644 drivers/input/touchscreen/hx-algo.h
+ create mode 100644 drivers/input/touchscreen/hx-frame-status.h
+
+diff --git a/drivers/input/touchscreen/Kconfig b/drivers/input/touchscreen/Kconfig
+index 9b9ae8ac3..898752046 100644
+--- a/drivers/input/touchscreen/Kconfig
++++ b/drivers/input/touchscreen/Kconfig
+@@ -1414,4 +1414,32 @@ config TOUCHSCREEN_HIMAX_HX83112B
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called himax_hx83112b.
+ 
++config TOUCHSCREEN_HIMAX_HX83121A_SPI
++	tristate "Himax HX83121A SPI touchscreen driver"
++	depends on SPI
++	select DRM_PANEL_BRIDGE
++	help
++	  Say Y here to enable support for Himax HX83121A touchscreens
++	  connected over SPI.
++
++	  This driver provides a complete touch-processing pipeline with
++	  CMF filtering, IIR temporal smoothing, palm rejection, weighted
++	  centroid detection, and multi-touch tracking.
++
++	  If unsure, say N.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called himax_hx83121a_spi.
++
++config TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	bool "Himax HX83121A full-rate diagnostic capture"
++	depends on TOUCHSCREEN_HIMAX_HX83121A_SPI
++	help
++	  Build the full-rate event trace and read-only diagnostic sysfs
++	  snapshots used to investigate intermittent touch dropouts. This adds
++	  per-interrupt matrix/event-stack copies and about 10.3 MiB of trace
++	  storage per device.
++
++	  Leave this disabled for normal use. Enable it only in kernels intended
++	  for capture with the Himax diagnostic app.
+ endif
+diff --git a/drivers/input/touchscreen/Makefile b/drivers/input/touchscreen/Makefile
+index bfd9de833..4120012d8 100644
+--- a/drivers/input/touchscreen/Makefile
++++ b/drivers/input/touchscreen/Makefile
+@@ -119,3 +119,7 @@ obj-$(CONFIG_TOUCHSCREEN_IQS5XX)	+= iqs5xx.o
+ obj-$(CONFIG_TOUCHSCREEN_IQS7211)	+= iqs7211.o
+ obj-$(CONFIG_TOUCHSCREEN_ZINITIX)	+= zinitix.o
+ obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83112B)	+= himax_hx83112b.o
++obj-$(CONFIG_TOUCHSCREEN_HIMAX_HX83121A_SPI)	+= himax_hx83121a_spi.o
++himax_hx83121a_spi-y			:= himax-spi-core.o himax-spi-hw.o himax-spi-sysfs.o \
++				   hx-algo.o hx-algo-preprocess.o hx-algo-detect.o \
++				   hx-algo-resolve.o hx-algo-track.o
+diff --git a/drivers/input/touchscreen/himax-spi-core.c b/drivers/input/touchscreen/himax-spi-core.c
+new file mode 100644
+index 000000000..fd9c0942b
+--- /dev/null
++++ b/drivers/input/touchscreen/himax-spi-core.c
+@@ -0,0 +1,801 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Himax SPI Driver
++ * based on Himax hx83102j
++ *
++ * Copyright (C) 2019,2024 Himax Corporation.
++ * Copyright (C) 2026 Pengyu Luo <mitltlatltl@gmail.com>
++ */
++
++#include <linux/delay.h>
++#include <linux/dev_printk.h>
++#include <linux/input/mt.h>
++#include <linux/input/touchscreen.h>
++#include <linux/interrupt.h>
++#include <linux/limits.h>
++#include <linux/math.h>
++#include <linux/math64.h>
++#include <linux/mutex.h>
++#include <linux/module.h>
++#include <linux/power_supply.h>
++#include <linux/slab.h>
++#include <linux/spi/spi.h>
++#include <linux/sysfs.h>
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++#include <linux/timekeeping.h>
++#endif
++#include <linux/workqueue.h>
++
++#include <drm/drm_panel.h>
++
++#include "himax-spi.h"
++
++static bool disable_pressure = true;
++module_param(disable_pressure, bool, 0444);
++MODULE_PARM_DESC(disable_pressure,
++		 "Disable ABS_MT_TOUCH_MAJOR and ABS_MT_PRESSURE axes");
++
++static bool restore_afe_runtime = true;
++module_param(restore_afe_runtime, bool, 0644);
++MODULE_PARM_DESC(restore_afe_runtime,
++		 "Replay the 120 Hz scan-rate command after hardware initialization");
++
++static bool full_resume_on_panel_enable = true;
++module_param(full_resume_on_panel_enable, bool, 0644);
++MODULE_PARM_DESC(full_resume_on_panel_enable,
++		 "Run complete reset/reload/wake qualification on panel enable");
++
++bool himax_full_resume_enabled(void)
++{
++	return full_resume_on_panel_enable;
++}
++
++bool himax_restore_afe_enabled(void)
++{
++	return restore_afe_runtime;
++}
++
++static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on);
++static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts);
++static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts);
++static int himax_input_dev_config(struct himax_ts_data *ts)
++{
++	struct input_dev *input_dev;
++	int ret;
++
++	input_dev = devm_input_allocate_device(ts->dev);
++	if (!input_dev)
++		return -ENOMEM;
++
++	ts->input_dev = input_dev;
++	input_set_drvdata(input_dev, ts);
++
++	input_dev->name = "Himax Capacitive TouchScreen";
++	input_dev->phys = "input/ts";
++	input_dev->id.bustype = BUS_SPI;
++
++	/* Standard capacitive touchscreen fuzz (8) to absorb static finger deformation
++	 * during clicks, preventing libinput from treating 10px drifts as swipes.
++	 */
++	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_X,
++			     0, SZ_64K - 1, 8, 0);
++	input_set_abs_params(ts->input_dev, ABS_MT_POSITION_Y,
++			     0, SZ_64K - 1, 8, 0);
++	if (!disable_pressure) {
++		input_set_abs_params(ts->input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
++		input_set_abs_params(ts->input_dev, ABS_MT_PRESSURE, 0, 4095, 0, 0);
++		dev_info(ts->dev, "pressure/touch_major axes enabled\n");
++	} else {
++		dev_info(ts->dev, "pressure/touch_major axes disabled by module parameter\n");
++	}
++	touchscreen_parse_properties(ts->input_dev, true, &ts->props);
++
++	ret = input_mt_init_slots(ts->input_dev, HIMAX_MAX_TOUCH,
++				  INPUT_MT_DIRECT | INPUT_MT_DROP_UNUSED);
++	if (ret)
++		return ret;
++
++	ret = input_register_device(ts->input_dev);
++	if (ret)
++		return ret;
++
++	return 0;
++}
++
++static void himax_release_all_touches(struct himax_ts_data *ts)
++{
++	if (ts->algo)
++		hx_algo_clear_live_state(ts->algo);
++
++	if (ts->input_dev)
++		himax_report_tracked_state(ts, false);
++}
++
++static int himax_warm_resume(struct himax_ts_data *ts)
++{
++	int ret;
++
++	himax_release_all_touches(ts);
++	hx_algo_begin_wake(ts->algo);
++	ret = himax_verify_running_ic(ts);
++	if (ret)
++		return ret;
++	ret = himax_restore_raw_runtime(ts);
++	if (ret)
++		return ret;
++
++	ret = himax_restore_afe_runtime(ts);
++	if (ret)
++		dev_warn(ts->dev,
++			 "warm-resume AFE mode replay incomplete: %d\n", ret);
++
++	ret = himax_wait_for_stable_event_frames(ts);
++	if (ret)
++		return ret;
++
++	ts->retained_suspend = false;
++	ts->controller_initialized = true;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	ts->warm_resume_count++;
++#endif
++	himax_int_enable(ts, true);
++	dev_info(ts->dev, "retained-state resume completed\n");
++	return 0;
++}
++
++static int himax_hw_reinit(struct himax_ts_data *ts, bool check_crc)
++{
++	u32 crc_hw;
++	int afe_ret;
++	int ret;
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	ts->reset_generation++;
++#endif
++	ts->controller_initialized = false;
++	ts->retained_suspend = false;
++	himax_release_all_touches(ts);
++	hx_algo_begin_wake(ts->algo);
++
++	ret = hx83121a_chip_detect(ts);
++	if (ret) {
++		dev_err(ts->dev, "%s: IC detect failed\n", __func__);
++		goto out_enable_irq;
++	}
++
++	if (check_crc) {
++		ret = himax_mcu_check_crc(ts, 0, HIMAX_HX83121A_FLASH_SIZE, &crc_hw);
++		if (ret || crc_hw) {
++			if (!ret && crc_hw)
++				ret = -EINVAL;
++			dev_err(ts->dev, "hw crc failed, fw broken, fix it on windows\n");
++			goto out_enable_irq;
++		}
++	}
++
++	ret = himax_enable_fw_reload(ts);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: enable FW reload fail\n", __func__);
++		goto out_enable_irq;
++	}
++
++	ret = himax_mcu_power_on_init(ts);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: power-on init failed\n", __func__);
++	} else {
++		/*
++		 * Windows restores these AFE settings after every Chip::Init().
++		 * They are best-effort because older firmware may not expose the
++		 * command queue even though touch reporting itself is usable.
++		 */
++		afe_ret = himax_restore_afe_runtime(ts);
++		if (afe_ret)
++			dev_warn(ts->dev,
++				 "AFE runtime restore incomplete; continuing with firmware defaults\n");
++		ret = himax_restore_raw_runtime(ts);
++		if (ret)
++			dev_err(ts->dev, "cold-init runtime replay failed: %d\n",
++				ret);
++		if (!ret)
++			ret = himax_wait_for_stable_event_frames(ts);
++	}
++
++out_enable_irq:
++	if (!ret) {
++		ts->controller_initialized = true;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		ts->cold_init_count++;
++#endif
++		himax_int_enable(ts, true);
++	}
++	return ret;
++}
++
++static int himax_hw_reinit_retry(struct himax_ts_data *ts, bool check_crc,
++				 int retries, unsigned int delay_ms,
++				 const char *reason)
++{
++	int ret;
++	int attempt;
++
++	for (attempt = 1; attempt <= retries; attempt++) {
++		ret = himax_hw_reinit(ts, check_crc);
++		if (!ret)
++			return 0;
++
++		if (attempt < retries) {
++			dev_warn(ts->dev,
++				 "%s reinit attempt %d/%d failed, retrying in %u ms\n",
++				 reason, attempt, retries, delay_ms);
++			msleep(delay_ms);
++		}
++	}
++
++	dev_err(ts->dev, "%s reinit failed after %d attempts\n", reason, retries);
++	return ret;
++}
++
++int himax_manual_reset(struct himax_ts_data *ts)
++{
++	int ret;
++
++	cancel_delayed_work_sync(&ts->panel_reinit_work);
++	himax_lock(ts);
++	if (ts->shutting_down) {
++		ret = -ENODEV;
++		goto out_unlock;
++	}
++	if (!ts->panel_prepared || !ts->panel_enabled) {
++		ret = -EHOSTDOWN;
++		goto out_unlock;
++	}
++
++	ret = himax_hw_reinit_retry(ts, false,
++				    HIMAX_PANEL_REINIT_RETRIES,
++				    HIMAX_PANEL_REINIT_DELAY_MS,
++				    "manual");
++out_unlock:
++	himax_unlock(ts);
++	return ret;
++}
++
++static void himax_power_down(struct himax_ts_data *ts)
++{
++	himax_int_enable(ts, false);
++	himax_release_all_touches(ts);
++	gpiod_set_value_cansleep(ts->gpiod_rst, 1);
++	ts->controller_initialized = false;
++	ts->retained_suspend = false;
++}
++
++static void himax_retain_for_suspend(struct himax_ts_data *ts)
++{
++	himax_int_enable(ts, false);
++	himax_release_all_touches(ts);
++	ts->consecutive_frame_errors = 0;
++	ts->retained_suspend = ts->controller_initialized;
++}
++
++static int himax_panel_prepared(struct drm_panel_follower *follower)
++{
++	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
++						panel_follower);
++
++	himax_lock(ts);
++	if (ts->shutting_down) {
++		himax_unlock(ts);
++		return 0;
++	}
++
++	ts->panel_prepared = true;
++	himax_unlock(ts);
++
++	return 0;
++}
++
++static void himax_panel_reinit_work(struct work_struct *work)
++{
++	struct himax_ts_data *ts = container_of(to_delayed_work(work),
++						struct himax_ts_data,
++						panel_reinit_work);
++	int ret;
++
++	himax_lock(ts);
++	if (ts->shutting_down || !ts->panel_prepared || !ts->panel_enabled) {
++		himax_unlock(ts);
++		return;
++	}
++
++	/* Gaokun Windows performs the complete reset/reload path on screen-on.
++	 * Keep retained resume as an explicit A/B escape hatch, but default to the
++	 * deterministic full path while the electrical wake issue is evaluated.
++	 */
++	if (!full_resume_on_panel_enable && ts->retained_suspend &&
++	    ts->controller_initialized) {
++		ret = himax_warm_resume(ts);
++		if (ret) {
++			dev_warn(ts->dev,
++				 "retained-state resume failed (%d), falling back to hardware init\n",
++				 ret);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			ts->warm_resume_fallback_count++;
++#endif
++			ret = himax_hw_reinit_retry(ts, false,
++				HIMAX_PANEL_REINIT_RETRIES,
++				HIMAX_PANEL_REINIT_DELAY_MS, "panel-fallback");
++		}
++	} else {
++		ret = himax_hw_reinit_retry(ts, false,
++				HIMAX_PANEL_REINIT_RETRIES,
++				HIMAX_PANEL_REINIT_DELAY_MS,
++				full_resume_on_panel_enable ? "panel-full" :
++				"panel-cold");
++	}
++	if (ret)
++		himax_power_down(ts);
++	himax_unlock(ts);
++}
++
++static int himax_panel_enabled(struct drm_panel_follower *follower)
++{
++	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
++						panel_follower);
++
++	himax_lock(ts);
++	if (ts->shutting_down) {
++		himax_unlock(ts);
++		return 0;
++	}
++
++	ts->panel_enabled = true;
++	himax_unlock(ts);
++
++	mod_delayed_work(system_wq, &ts->panel_reinit_work,
++			 msecs_to_jiffies(HIMAX_PANEL_ENABLE_SETTLE_MS));
++	return 0;
++}
++
++static int himax_panel_disabling(struct drm_panel_follower *follower)
++{
++	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
++						panel_follower);
++
++	cancel_delayed_work_sync(&ts->panel_reinit_work);
++
++	himax_lock(ts);
++	ts->panel_enabled = false;
++	if (ts->panel_prepared)
++		himax_retain_for_suspend(ts);
++	himax_unlock(ts);
++
++	return 0;
++}
++
++static int himax_panel_unpreparing(struct drm_panel_follower *follower)
++{
++	struct himax_ts_data *ts = container_of(follower, struct himax_ts_data,
++						panel_follower);
++
++	cancel_delayed_work_sync(&ts->panel_reinit_work);
++
++	himax_lock(ts);
++	ts->panel_enabled = false;
++	ts->panel_prepared = false;
++	himax_retain_for_suspend(ts);
++	himax_unlock(ts);
++
++	return 0;
++}
++
++static const struct drm_panel_follower_funcs himax_panel_follower_funcs = {
++	.panel_prepared = himax_panel_prepared,
++	.panel_unpreparing = himax_panel_unpreparing,
++	.panel_enabled = himax_panel_enabled,
++	.panel_disabling = himax_panel_disabling,
++};
++
++/* -------------------------------------------------------------------------- */
++/* 中断处理 */
++
++static int hx83121a_gaokun_read_event_stack(struct himax_ts_data *ts)
++{
++	u32 i;
++	int ret;
++	const u32 max_trunk_sz = ts->spi_xfer_max_sz -
++		HIMAX_BUS_READ_HEADER_SIZE;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	u8 *buf = ts->event_read_buf;
++
++	/* Never destroy the last successful frame while attempting a new one. */
++	memset(buf, 0x00, ts->event_buf_sz);
++#else
++	u8 *buf = ts->event_buf;
++#endif
++	size_t length = HIMAX_FULL_EVENT_STACK_SIZE;
++
++	for (i = 0; i < length; i += max_trunk_sz) {
++		ret = himax_spi_read(ts, HIMAX_EVENT_STACK_ADDRESS, buf + i,
++					 min(length - i, max_trunk_sz));
++		if (ret) {
++			dev_err(ts->dev, "%s: read event stack error!\n", __func__);
++			return ret;
++		}
++	}
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	memcpy(ts->event_buf, buf, length);
++#endif
++
++	return 0;
++}
++
++/* The Xiaomi coordinate path can trust a checksum-protected firmware packet
++ * immediately after resume.  Our 0xf6 raw producer has a separate SRAM
++ * handshake, so do not expose IRQs until several newly sampled master frames
++ * prove that the producer is running and no retry frame is pending.
++ */
++static int himax_wait_for_stable_event_frames(struct himax_ts_data *ts)
++{
++	struct hx_frame_status status;
++	u32 previous_hash = 0;
++	bool have_previous = false;
++	int attempt;
++	int ret = -EIO;
++
++	for (attempt = 0; attempt < HIMAX_RESUME_QUALITY_ATTEMPTS; attempt++) {
++		u32 hash = 2166136261U;
++		u32 i;
++		int quality;
++
++		memset(&status, 0, sizeof(status));
++		usleep_range(8000, 9000);
++		ret = hx83121a_gaokun_read_event_stack(ts);
++		if (!ret &&
++		    hx_parse_master_frame_status(ts->event_buf, ts->event_buf_sz,
++						 &status) &&
++		    !status.retry) {
++			for (i = 0; i < ts->event_buf_sz; i++)
++				hash = (hash ^ ts->event_buf[i]) * 16777619U;
++			/* Valid but byte-identical reads can be a stale SRAM image;
++			 * they do not prove that scanning resumed.
++			 */
++			if (have_previous && hash == previous_hash)
++				continue;
++			previous_hash = hash;
++			have_previous = true;
++			quality = hx_algo_qualify_wake_frame(ts->algo,
++				(const u16 *)(ts->event_buf + HX_FRAME_HEADER_BYTES),
++				status.has_finger ? HX_FINGER_PRESENT :
++				HX_FINGER_ABSENT);
++			if (quality > HX_WAKE_QUALITY_PENDING) {
++				const char *baseline_source = "new baseline";
++
++				if (quality == HX_WAKE_QUALITY_USING_SAFE)
++					baseline_source = "last-safe baseline";
++				else if (quality == HX_WAKE_QUALITY_PROTECTED)
++					baseline_source = "protected neutral baseline";
++				dev_info(ts->dev,
++					 "raw producer passed wake quality (%s)\n",
++					 baseline_source);
++				return 0;
++			}
++			if (quality == HX_WAKE_QUALITY_REJECTED)
++				ret = -EUCLEAN;
++		} else {
++			if (!ret)
++				ret = -EAGAIN;
++		}
++	}
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	ts->resume_stability_failures++;
++#endif
++	dev_err(ts->dev,
++		"raw event producer did not pass wake quality after resume\n");
++	return ret;
++}
++
++
++static void himax_report_tracked_state(struct himax_ts_data *ts, bool report_on)
++{
++	int i;
++
++	if (!ts->algo || !ts->input_dev)
++		return;
++
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++		bool on = report_on && ts->algo->tracks[i].active &&
++			  ts->algo->tracks[i].reported;
++
++		input_mt_slot(ts->input_dev, i);
++		input_mt_report_slot_state(ts->input_dev, MT_TOOL_FINGER, on);
++		if (!on)
++			continue;
++
++		touchscreen_report_pos(ts->input_dev, &ts->props,
++				       ts->algo->tracks[i].x, ts->algo->tracks[i].y, true);
++		if (!disable_pressure) {
++			if (ts->algo->pressure_enabled) {
++				input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR,
++						 min_t(s32, int_sqrt(ts->algo->tracks[i].signal_sum >> 4) * 4, 255));
++				input_report_abs(ts->input_dev, ABS_MT_PRESSURE,
++						 clamp_t(s32, ts->algo->tracks[i].signal_sum >> 2, 0, 4095));
++			} else {
++				input_report_abs(ts->input_dev, ABS_MT_TOUCH_MAJOR, 1);
++				input_report_abs(ts->input_dev, ABS_MT_PRESSURE, 4095);
++			}
++		}
++	}
++
++	/*
++	 * Also emit single-touch pointer emulation so compositors that still
++	 * key parts of their touchscreen handling off ABS_X/ABS_Y or BTN_TOUCH
++	 * observe a coherent state across suspend/resume.
++	 */
++	input_mt_report_pointer_emulation(ts->input_dev, true);
++	input_mt_sync_frame(ts->input_dev);
++	input_sync(ts->input_dev);
++}
++
++/* Byte offset into the SPI event buffer where the raw capacitance grid starts. */
++#define OFST 4
++
++static irqreturn_t himax_ts_thread(int irq, void *data)
++{
++	struct himax_ts_data *ts = data;
++	u16 *ptr = (u16 *)(ts->event_buf + OFST);
++	struct hx_algo *algo = ts->algo;
++	struct hx_frame_status frame_status = { 0 };
++	bool master_valid;
++	int read_ret;
++	int stable_cnt;
++	irqreturn_t irq_ret = IRQ_HANDLED;
++
++	mutex_lock(&ts->op_lock);
++	if (!algo) {
++		irq_ret = IRQ_NONE;
++		goto out_unlock;
++	}
++
++	read_ret = hx83121a_gaokun_read_event_stack(ts);
++	if (read_ret) {
++		himax_trace_record_irq(ts, read_ret, false, &frame_status, false);
++		/* AFE transitions can transiently lose one or two frames.  Resetting
++		 * the controller on the first miss creates a long, user-visible UP/
++		 * DOWN break.  Match the Windows runtime recovery policy and recover
++		 * only after a consecutive failure streak.
++		 */
++		if (++ts->consecutive_frame_errors >=
++		    HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS) {
++			int recovery_ret;
++
++			dev_err(ts->dev, "%u consecutive frame reads failed, resetting controller\n",
++				ts->consecutive_frame_errors);
++			ts->consecutive_frame_errors = 0;
++			/* A pin reset alone can leave the controller in a partially
++			 * initialized state.  Run the same full reset/detect/FW-init
++			 * sequence used by probe and panel recovery.  chip_detect()
++			 * starts every attempt with a hardware reset.
++			 */
++			himax_int_enable(ts, false);
++			recovery_ret = himax_hw_reinit_retry(ts, false,
++							HIMAX_PANEL_REINIT_RETRIES,
++							HIMAX_PANEL_REINIT_DELAY_MS,
++							"frame");
++			if (recovery_ret)
++				dev_err(ts->dev,
++					"frame recovery failed; touch IRQ remains disabled\n");
++		} else {
++			dev_warn_ratelimited(ts->dev,
++				"touch frame read failed (%u/%u), retaining tracks\n",
++				ts->consecutive_frame_errors,
++				HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS);
++		}
++		goto out_unlock;
++	}
++	ts->consecutive_frame_errors = 0;
++	master_valid = hx_parse_master_frame_status(ts->event_buf,
++						   ts->event_buf_sz,
++						   &frame_status);
++	if (!master_valid || frame_status.retry) {
++		/* A shifted, non-master, or retry frame is not a missing touch frame:
++		 * retain and re-report current tracks without feeding garbage into the
++		 * baseline or advancing tracker miss counters.
++		 */
++		dev_warn_ratelimited(ts->dev,
++			"discarding invalid/retry master event-stack frame\n");
++		stable_cnt = hx_count_stable_tracks(algo);
++		himax_trace_record_irq(ts, 0, master_valid, &frame_status, false);
++		goto report;
++	}
++	if (hx_algo_is_exception_frame(algo, ptr)) {
++		int recovery_ret;
++
++		stable_cnt = hx_count_stable_tracks(algo);
++		himax_trace_record_irq(ts, 0, true, &frame_status, true);
++		if (++ts->consecutive_noise_frames <
++		    HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES) {
++			dev_warn_ratelimited(ts->dev,
++				"holding tracks across electrical-noise frame (%u/%u)\n",
++				ts->consecutive_noise_frames,
++				HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES);
++			goto report;
++		}
++		ts->consecutive_noise_frames = 0;
++		dev_err(ts->dev,
++			"persistent electrical-noise frames, reinitializing controller\n");
++		himax_int_enable(ts, false);
++		recovery_ret = himax_hw_reinit_retry(ts, false,
++			HIMAX_PANEL_REINIT_RETRIES, HIMAX_PANEL_REINIT_DELAY_MS,
++			"noise");
++		if (recovery_ret)
++			dev_err(ts->dev,
++				"noise recovery failed; touch IRQ remains disabled\n");
++		goto out_unlock;
++	}
++	ts->consecutive_noise_frames = 0;
++
++	stable_cnt = hx_algo_process_frame_state(algo, ptr,
++		frame_status.has_finger ? HX_FINGER_PRESENT : HX_FINGER_ABSENT);
++	himax_trace_record_irq(ts, 0, true, &frame_status, false);
++
++report:
++	himax_report_tracked_state(ts, stable_cnt > 0);
++
++out_unlock:
++	mutex_unlock(&ts->op_lock);
++	return irq_ret;
++}
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++static void himax_kvfree_action(void *data)
++{
++	kvfree(data);
++}
++#endif
++
++static int himax_spi_probe(struct spi_device *spi)
++{
++	int ret;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	size_t trace_ring_size;
++	size_t trace_snapshot_size;
++#endif
++	struct himax_ts_data *ts;
++
++	ts = devm_kzalloc(&spi->dev, sizeof(struct himax_ts_data), GFP_KERNEL);
++	if (!ts)
++		return -ENOMEM;
++
++	ts->dev = &spi->dev;
++
++	ts->gpiod_rst = devm_gpiod_get_optional(ts->dev, "reset", GPIOD_OUT_HIGH);
++	if (IS_ERR(ts->gpiod_rst)) {
++		dev_err(ts->dev, "%s: gpio-rst value is not valid\n", __func__);
++		return -EIO;
++	}
++
++	spi->bits_per_word = 8;
++	spi->mode = SPI_MODE_3;
++	spi->cs_setup.value = HIMAX_SPI_CS_SETUP_TIME;
++
++	ts->spi = spi;
++	ts->spi_xfer_max_sz = HIMAX_FULL_EVENT_STACK_SIZE;
++	ts->xfer_buf_sz = ts->spi_xfer_max_sz;
++	ts->event_buf_sz = HIMAX_FULL_EVENT_STACK_SIZE;
++	ts->xfer_buf = devm_kzalloc(ts->dev, ts->xfer_buf_sz, GFP_KERNEL);
++	if (!ts->xfer_buf)
++		return -ENOMEM;
++
++	ts->event_buf = devm_kzalloc(ts->dev, ts->event_buf_sz, GFP_KERNEL);
++	if (!ts->event_buf)
++		return -ENOMEM;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	ts->event_read_buf = devm_kzalloc(ts->dev, ts->event_buf_sz, GFP_KERNEL);
++	if (!ts->event_read_buf)
++		return -ENOMEM;
++	trace_ring_size = HIMAX_TRACE_CAPACITY *
++		sizeof(struct himax_trace_record);
++	trace_snapshot_size = sizeof(struct himax_trace_header) + trace_ring_size;
++	ts->trace_ring = kvzalloc(trace_ring_size, GFP_KERNEL);
++	if (!ts->trace_ring)
++		return -ENOMEM;
++	ret = devm_add_action_or_reset(ts->dev, himax_kvfree_action,
++				       ts->trace_ring);
++	if (ret)
++		return ret;
++	ts->trace_snapshot = kvzalloc(trace_snapshot_size, GFP_KERNEL);
++	if (!ts->trace_snapshot)
++		return -ENOMEM;
++	ret = devm_add_action_or_reset(ts->dev, himax_kvfree_action,
++				       ts->trace_snapshot);
++	if (ret)
++		return ret;
++#endif
++
++	ts->algo = devm_kzalloc(ts->dev, sizeof(*ts->algo), GFP_KERNEL);
++	if (!ts->algo)
++		return -ENOMEM;
++	hx_algo_init_defaults(ts->algo);
++	hx_algo_full_reset(ts->algo);
++
++	spin_lock_init(&ts->irq_lock);
++	mutex_init(&ts->op_lock);
++	INIT_DELAYED_WORK(&ts->panel_reinit_work, himax_panel_reinit_work);
++	dev_set_drvdata(&spi->dev, ts);
++	spi_set_drvdata(spi, ts);
++
++	ret = himax_input_dev_config(ts);
++	if (ret) {
++		dev_err(ts->dev, "input device set failed\n");
++		return ret;
++	}
++
++	ret = devm_request_threaded_irq(ts->dev, ts->spi->irq, NULL,
++					himax_ts_thread,
++					IRQF_ONESHOT | IRQF_NO_AUTOEN,
++					"himax-spi-ts", ts);
++	if (ret) {
++		dev_err(ts->dev, "request irq failed. ret=%d\n", ret);
++		return ret;
++	}
++
++	ret = himax_sysfs_init(ts);
++	if (ret) {
++		dev_err(ts->dev, "failed to create sysfs controls: %d\n", ret);
++		return ret;
++	}
++
++	ts->panel_follower.funcs = &himax_panel_follower_funcs;
++	ret = devm_drm_panel_add_follower(ts->dev, &ts->panel_follower);
++	if (ret) {
++		himax_sysfs_remove(ts);
++		return dev_err_probe(ts->dev, ret,
++				     "failed to register panel follower\n");
++	}
++
++	return 0;
++}
++
++static void himax_spi_remove(struct spi_device *spi)
++{
++	struct himax_ts_data *ts = spi_get_drvdata(spi);
++
++	cancel_delayed_work_sync(&ts->panel_reinit_work);
++	himax_sysfs_remove(ts);
++
++	himax_lock(ts);
++	ts->shutting_down = true;
++	ts->panel_enabled = false;
++	ts->panel_prepared = false;
++	himax_power_down(ts);
++	himax_unlock(ts);
++}
++
++static const struct spi_device_id himax_spi_ids[] = {
++	{ .name = "hx83121a-ts" },
++	{ .name = "hx83121a" },
++	{ },
++};
++MODULE_DEVICE_TABLE(spi, himax_spi_ids);
++
++static const struct of_device_id himax_spi_of_match[] = {
++	{ .compatible = "himax,hx83121a-ts" },
++	{ .compatible = "himax,hx83121a" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, himax_spi_of_match);
++
++static struct spi_driver himax_spi_driver = {
++	.driver = {
++		.name = "himax-spi",
++		.of_match_table = himax_spi_of_match,
++	},
++	.probe = himax_spi_probe,
++	.remove = himax_spi_remove,
++	.id_table = himax_spi_ids,
++};
++module_spi_driver(himax_spi_driver);
++
++MODULE_LICENSE("GPL");
++MODULE_AUTHOR("Pengyu Luo <mitltlatltl@gmail.com>");
++MODULE_DESCRIPTION("Himax HX83121A SPI touchscreen driver");
+diff --git a/drivers/input/touchscreen/himax-spi-hw.c b/drivers/input/touchscreen/himax-spi-hw.c
+new file mode 100644
+index 000000000..a7a6c2d69
+--- /dev/null
++++ b/drivers/input/touchscreen/himax-spi-hw.c
+@@ -0,0 +1,906 @@
++// SPDX-License-Identifier: GPL-2.0
++/* HX83121A SPI transport, register access and firmware control. */
++
++#include <linux/delay.h>
++#include <linux/dev_printk.h>
++#include <linux/interrupt.h>
++#include <linux/power_supply.h>
++#include <linux/slab.h>
++
++#include "himax-spi.h"
++
++#define HIMAX_BUS_RETRY					3
++/* SPI bus read header length */
++#define HIMAX_BUS_R_HLEN				3U
++/* SPI bus write header length */
++#define HIMAX_BUS_W_HLEN				2U
++/* TP SRAM address size and data size */
++#define HIMAX_REG_SZ					4U
++#define HIMAX_HX83121A_SAFE_MODE_PASSWORD		0x9527
++
++/* Clear 4 bytes data */
++#define HIMAX_DATA_CLEAR				0x00000000
++/* AHB register addresses */
++#define HIMAX_AHB_ADDR_BYTE_0				0x00
++#define HIMAX_AHB_ADDR_RDATA_BYTE_0			0x08
++#define HIMAX_AHB_ADDR_ACCESS_DIRECTION			0x0c
++#define HIMAX_AHB_ADDR_INCR4				0x0d
++#define HIMAX_AHB_ADDR_CONTI				0x13
++#define HIMAX_AHB_ADDR_EVENT_STACK			0x30
++#define HIMAX_AHB_ADDR_PSW_LB				0x31
++
++/* AHB register values/commands */
++#define HIMAX_AHB_CMD_ACCESS_DIRECTION_READ		0x00
++#define HIMAX_AHB_CMD_CONTI				0x31
++#define HIMAX_AHB_CMD_INCR4				0x10
++#define HIMAX_AHB_CMD_INCR4_ADD_4_BYTE			0x01
++#define HIMAX_AHB_CMD_LEAVE_SAFE_MODE			0x0000
++
++/* DSRAM flag addresses */
++#define HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD		0x100072c0
++#define HIMAX_DSRAM_ADDR_FLASH_RELOAD			0x10007f00
++#define HIMAX_DSRAM_ADDR_SORTING_MODE_EN		0x10007f04
++#define HIMAX_DSRAM_ADDR_SET_NFRAME			0x10007294
++#define HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD		0x10000000
++#define HIMAX_DSRAM_ADDR_AP_NOTIFY_FW_SUSPEND		0x10007fd0
++#define HIMAX_DSRAM_ADDR_USB_DETECT			0x10007f38
++
++/* dsram flag data */
++#define HIMAX_DSRAM_DATA_FW_RELOAD_DONE			0x000072c0
++#define HIMAX_DSRAM_DATA_AP_RESUMED			0x00000000
++#define HIMAX_DSRAM_DATA_USB_CONNECTED			0xa55aa55a
++/* hx83121a-specific register/dsram flags/data */
++#define HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL		0x100072ec
++
++/* Firmware AFE command queue used by the Windows v1.1.2 runtime. */
++#define HIMAX_HX83121A_AFE_CMD_SLOT_BASE		0x10007550
++#define HIMAX_HX83121A_AFE_CMD_SLOT_STRIDE		0x10
++#define HIMAX_HX83121A_AFE_CMD_SLOT_COUNT		5
++#define HIMAX_HX83121A_AFE_CMD_PACKET_SIZE		16
++#define HIMAX_HX83121A_AFE_CMD_START_CALIBRATION	0x01
++#define HIMAX_HX83121A_AFE_CMD_FORCE_SCAN_RATE		0x0e
++#define HIMAX_HX83121A_AFE_SCAN_RATE_120HZ		0x00
++
++/* hardware register addresses */
++#define HIMAX_REG_ADDR_RELOAD_STATUS			0x80050000
++#define HIMAX_REG_ADDR_RELOAD_CRC32_RESULT		0x80050018
++#define HIMAX_REG_ADDR_RELOAD_ADDR_FROM			0x80050020
++#define HIMAX_REG_ADDR_RELOAD_ADDR_CMD_BEAT		0x80050028
++#define HIMAX_REG_ADDR_CTRL_FW				0x9000005c
++#define HIMAX_REG_ADDR_FW_STATUS			0x900000a8
++#define HIMAX_REG_ADDR_ICID				0x900000d0
++
++/* hardware reg data/flags */
++#define HIMAX_REG_DATA_FW_STATE_RUNNING			0x05
++#define HIMAX_REG_DATA_FW_STATE_SAFE_MODE		0x0c
++#define HIMAX_REG_DATA_FW_RE_INIT			0x00
++#define HIMAX_REG_DATA_FW_GO_SAFEMODE			0xa5
++#define HIMAX_REG_DATA_FW_IN_SAFEMODE			0x87
++#define HIMAX_REG_DATA_RELOAD_DONE			0x01
++#define HIMAX_REG_DATA_RELOAD_PASSWORD			0x99
++
++/* SPI CS setup time */
++/* HIMAX SPI function select, 1st byte of any SPI command sequence */
++#define HIMAX_SPI_FUNCTION_READ				0xf3
++#define HIMAX_SPI_FUNCTION_WRITE			0xf2
++
++union himax_dword_data {
++	u32 dword;
++	u16 word[2];
++	u8 byte[4];
++};
++
++int himax_spi_read(struct himax_ts_data *ts, u8 cmd, u8 *buf, u32 len)
++{
++	struct spi_message msg;
++	struct spi_transfer xfer = {
++		.len = HIMAX_BUS_R_HLEN + len,
++		.tx_buf = ts->xfer_buf,
++		.rx_buf = ts->xfer_buf,
++		.cs_change = 0,
++	};
++	int retry_cnt;
++	int ret;
++
++	memset(ts->xfer_buf, 0, HIMAX_BUS_R_HLEN + len);
++	ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_READ;
++	ts->xfer_buf[1] = cmd;
++	ts->xfer_buf[2] = 0x00;
++
++	spi_message_init(&msg);
++	spi_message_add_tail(&xfer, &msg);
++
++	for (retry_cnt = 0; retry_cnt < HIMAX_BUS_RETRY; retry_cnt++) {
++		ret = spi_sync(ts->spi, &msg);
++		if (ret < 0)
++			dev_err_ratelimited(ts->dev,
++					    "SPI read failed: %d (attempt %d/%d)\n",
++					    ret, retry_cnt + 1, HIMAX_BUS_RETRY);
++		else
++			break;
++	}
++
++	if (ret < 0)
++		return ret;
++
++	/* Destination may alias xfer_buf when caller reuses driver buffers. */
++	memmove(buf, ts->xfer_buf + HIMAX_BUS_R_HLEN, len);
++	return 0;
++}
++
++/*
++ * 1st byte is the spi function select and 2nd byte is the command belong to the
++ * spi function. Else is the data to write.
++ */
++static int himax_spi_write(struct himax_ts_data *ts, u8 *tx_buf, u32 len)
++{
++	int ret;
++	struct spi_message msg;
++	struct spi_transfer xfer = {
++		.tx_buf = tx_buf,
++		.len = len,
++		.cs_change = 0,
++	};
++
++	spi_message_init(&msg);
++	spi_message_add_tail(&xfer, &msg);
++
++	ret = spi_sync(ts->spi, &msg);
++	if (ret < 0) {
++		dev_err(ts->dev, "SPI write failed: %d\n", ret);
++		return ret;
++	}
++
++	return 0;
++}
++
++static int himax_write(struct himax_ts_data *ts, u8 cmd, u8 *addr,
++		       const u8 *data, u32 len)
++{
++	u8 *ptr = ts->xfer_buf;
++
++	memset(ts->xfer_buf, 0, len + HIMAX_BUS_W_HLEN);
++	ts->xfer_buf[0] = HIMAX_SPI_FUNCTION_WRITE;
++	ts->xfer_buf[1] = cmd;
++	ptr += HIMAX_BUS_W_HLEN;
++	len += HIMAX_BUS_W_HLEN;
++
++	if (addr) {
++		memcpy(ptr, addr, 4);
++		ptr += 4;
++	}
++
++	if (data)
++		memcpy(ptr, data, len - (ptr - ts->xfer_buf));
++
++	return himax_spi_write(ts, ts->xfer_buf, len);
++}
++
++/**
++ * himax_mcu_set_burst_mode() - Set burst mode for MCU
++ * @ts: Himax touch screen data
++ * @auto_add_4_byte: Enable auto add 4 byte mode
++ *
++ * Set burst mode for MCU, which is used for read/write data from/to MCU.
++ * HIMAX_AHB_ADDR_CONTI config the IC to take data continuously,
++ * HIMAX_AHB_ADDR_INCR4 config the IC to auto increment the address by 4 byte when
++ * each 4 bytes read/write.
++ *
++ * Return: 0 on success, negative error code on failure
++ */
++static int himax_mcu_set_burst_mode(struct himax_ts_data *ts, bool auto_add_4_byte)
++{
++	int ret;
++	u8 tmp;
++
++	tmp = HIMAX_AHB_CMD_CONTI;
++	ret = himax_write(ts, HIMAX_AHB_ADDR_CONTI, NULL, &tmp, 1);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: write ahb_addr_conti failed\n", __func__);
++		return ret;
++	}
++
++	tmp = HIMAX_AHB_CMD_INCR4;
++	if (auto_add_4_byte)
++		tmp |= HIMAX_AHB_CMD_INCR4_ADD_4_BYTE;
++
++	ret = himax_write(ts, HIMAX_AHB_ADDR_INCR4, NULL, &tmp, 1);
++	if (ret < 0)
++		dev_err(ts->dev, "%s: write ahb_addr_incr4 failed\n", __func__);
++
++	return ret;
++}
++
++/*
++ * Read data from himax internal registers and SRAM
++ *
++ * We write the (SRAM)address to AHB register to tell where to read. Then set
++ * the access direction to read, and read the data from AHB register.
++ */
++static int himax_mcu_register_read(struct himax_ts_data *ts, u32 addr, u8 *buf, u32 len)
++{
++	int ret;
++	u8 direction_switch = HIMAX_AHB_CMD_ACCESS_DIRECTION_READ;
++	union himax_dword_data target_addr;
++
++	ret = himax_mcu_set_burst_mode(ts, len > HIMAX_REG_SZ);
++	if (ret)
++		return ret;
++
++	target_addr.dword = cpu_to_le32(addr);
++	ret = himax_write(ts, HIMAX_AHB_ADDR_BYTE_0, target_addr.byte, NULL, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: write ahb_addr_byte_0 failed\n", __func__);
++		return ret;
++	}
++
++	ret = himax_write(ts, HIMAX_AHB_ADDR_ACCESS_DIRECTION, NULL,
++				  &direction_switch, 1);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: write ahb_addr_access_direction failed\n", __func__);
++		return ret;
++	}
++
++	ret = himax_spi_read(ts, HIMAX_AHB_ADDR_RDATA_BYTE_0, buf, len);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: read ahb_addr_rdata_byte_0 failed\n", __func__);
++		return ret;
++	}
++
++	return himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
++}
++
++/* Write the internal (SRAM)address and data to AHB register */
++static int himax_mcu_register_write(struct himax_ts_data *ts, u32 addr, const u8 *buf, u32 len)
++{
++	int ret;
++
++	union himax_dword_data target_addr;
++
++	ret = himax_mcu_set_burst_mode(ts, len > HIMAX_REG_SZ);
++	if (ret)
++		return ret;
++
++	target_addr.dword = cpu_to_le32(addr);
++	ret = himax_write(ts, HIMAX_AHB_ADDR_BYTE_0,
++				target_addr.byte, buf, len + HIMAX_REG_SZ);
++	if (ret < 0)
++		dev_err(ts->dev, "%s: write ahb_addr_byte_0 failed\n", __func__);
++
++	return himax_mcu_set_burst_mode(ts, !(len > HIMAX_REG_SZ));
++}
++
++/* Xiaomi replays firmware-owned state with write/read retry loops.  Keep the
++ * same rule, but require an exact readback (their AP-notify loop accidentally
++ * stops on a successful read even when the value differs).
++ */
++static int himax_mcu_write_verify_u32(struct himax_ts_data *ts, u32 addr,
++				      u32 value, int attempts)
++{
++	union himax_dword_data expected = { .dword = cpu_to_le32(value) };
++	union himax_dword_data actual;
++	int attempt;
++	int ret = -EIO;
++
++	for (attempt = 0; attempt < attempts; attempt++) {
++		ret = himax_mcu_register_write(ts, addr, expected.byte,
++					       sizeof(expected.byte));
++		if (ret)
++			continue;
++		usleep_range(1000, 1100);
++		ret = himax_mcu_register_read(ts, addr, actual.byte,
++					      sizeof(actual.byte));
++		if (!ret && actual.dword == expected.dword)
++			return 0;
++		if (!ret)
++			ret = -EIO;
++	}
++
++	dev_err(ts->dev, "register 0x%08x failed readback for 0x%08x\n",
++		addr, value);
++	return ret;
++}
++
++static void himax_afe_build_command(u8 command, u8 value, u8 *packet)
++{
++	u32 sum = 0;
++	u16 checksum;
++	int i;
++
++	memset(packet, 0, HIMAX_HX83121A_AFE_CMD_PACKET_SIZE);
++	packet[0] = 0xa8;
++	packet[1] = 0x8a;
++	packet[2] = command;
++	packet[4] = value;
++
++	for (i = 0; i < HIMAX_HX83121A_AFE_CMD_PACKET_SIZE; i += 2)
++		sum += packet[i] | ((u16)packet[i + 1] << 8);
++	checksum = (u16)(0U - sum);
++	packet[14] = checksum & 0xff;
++	packet[15] = checksum >> 8;
++
++	/*
++	 * The virtual header participates in the checksum, then the trigger write
++	 * supplies it after the full command body has reached the slot.
++	 */
++	packet[0] = 0;
++	packet[1] = 0;
++}
++
++static int himax_afe_send_command(struct himax_ts_data *ts, u8 *slot,
++				  u8 command, u8 value)
++{
++	u8 packet[HIMAX_HX83121A_AFE_CMD_PACKET_SIZE];
++	u8 trigger[4] = { 0xa8, 0x8a, command, 0x00 };
++	u8 response[HIMAX_HX83121A_AFE_CMD_PACKET_SIZE];
++	u32 addr;
++	int ret;
++
++	addr = HIMAX_HX83121A_AFE_CMD_SLOT_BASE +
++		(*slot % HIMAX_HX83121A_AFE_CMD_SLOT_COUNT) *
++		HIMAX_HX83121A_AFE_CMD_SLOT_STRIDE;
++	himax_afe_build_command(command, value, packet);
++
++	ret = himax_mcu_register_write(ts, addr, packet, sizeof(packet));
++	if (ret)
++		return ret;
++	ret = himax_mcu_register_write(ts, addr, trigger, sizeof(trigger));
++	if (ret)
++		return ret;
++	ret = himax_mcu_register_read(ts, addr, response, sizeof(response));
++	if (ret)
++		return ret;
++
++	*slot = (*slot + 1) % HIMAX_HX83121A_AFE_CMD_SLOT_COUNT;
++	return 0;
++}
++
++int himax_restore_afe_runtime(struct himax_ts_data *ts)
++{
++	int ret;
++
++	if (!himax_restore_afe_enabled())
++		return 0;
++
++	/* StartCalibration is intentionally absent here.  The command transport
++	 * has no calibration-complete acknowledgement in the recovered screen-on
++	 * path; issuing it and immediately consuming raw frames races the AFE.
++	 */
++	ret = himax_afe_send_command(ts, &ts->afe_command_slot,
++				     HIMAX_HX83121A_AFE_CMD_FORCE_SCAN_RATE,
++				     HIMAX_HX83121A_AFE_SCAN_RATE_120HZ);
++	if (ret)
++		dev_warn(ts->dev, "failed to force 120 Hz scan rate: %d\n", ret);
++	else
++		dev_info(ts->dev, "120 Hz scan-rate command transport completed\n");
++
++	return ret;
++}
++
++/*
++ * Wakeup IC bus interface. The IC may enter sleep mode and need to wakeup
++ * before any operation.
++ */
++static int himax_mcu_interface_on(struct himax_ts_data *ts)
++{
++	int ret;
++	u8 buf[HIMAX_REG_SZ];
++	u8 buf2[HIMAX_REG_SZ];
++	u32 retry_cnt;
++	const u32 burst_retry_limit = 10;
++
++	/* Read a dummy register to wake up BUS. */
++	ret = himax_spi_read(ts, HIMAX_AHB_ADDR_RDATA_BYTE_0, buf, 4);
++	if (ret < 0)
++		goto err;
++
++	for (retry_cnt = 0; retry_cnt < burst_retry_limit; retry_cnt++) {
++		ret = himax_mcu_set_burst_mode(ts, false);
++		if (ret < 0)
++			goto err;
++
++		/* Check cmd */
++		ret = himax_spi_read(ts, HIMAX_AHB_ADDR_CONTI, buf, 1);
++		if (ret < 0)
++			goto err;
++
++		ret = himax_spi_read(ts, HIMAX_AHB_ADDR_INCR4, buf2, 1);
++		if (ret < 0)
++			goto err;
++
++		if (buf[0] == HIMAX_AHB_CMD_CONTI && buf2[0] == HIMAX_AHB_CMD_INCR4)
++			return 0;
++
++		usleep_range(1000, 1100);
++	}
++
++err:
++	dev_err(ts->dev, "%s: failed!\n", __func__);
++
++	return -EIO;
++}
++
++static void himax_pin_reset(struct himax_ts_data *ts)
++{
++	gpiod_set_value_cansleep(ts->gpiod_rst, 1);
++	usleep_range(20000, 20100);
++	gpiod_set_value_cansleep(ts->gpiod_rst, 0);
++	usleep_range(50000, 50100);
++}
++
++void himax_int_enable(struct himax_ts_data *ts, bool enable)
++{
++	unsigned long flags;
++
++	spin_lock_irqsave(&ts->irq_lock, flags);
++	if (enable && ts->irq_enabled == false)
++		enable_irq(ts->spi->irq);
++	else if (!enable && ts->irq_enabled == true)
++		disable_irq_nosync(ts->spi->irq);
++	ts->irq_enabled = enable;
++	spin_unlock_irqrestore(&ts->irq_lock, flags);
++}
++
++static void himax_quiesce_irq(struct himax_ts_data *ts)
++{
++	himax_int_enable(ts, false);
++	synchronize_irq(ts->spi->irq);
++}
++
++void himax_lock(struct himax_ts_data *ts)
++{
++	himax_quiesce_irq(ts);
++	mutex_lock(&ts->op_lock);
++}
++
++void himax_unlock(struct himax_ts_data *ts)
++{
++	mutex_unlock(&ts->op_lock);
++}
++
++static void himax_mcu_ic_reset(struct himax_ts_data *ts, bool int_off)
++{
++	if (int_off)
++		himax_int_enable(ts, false);
++
++	himax_pin_reset(ts);
++
++	if (int_off)
++		himax_int_enable(ts, true);
++}
++
++/**
++ * sense_off: stop MCU
++ * 1. request FW to stop
++ * 2. enter safe mode (and reset TCON for some ICs).
++ *
++ * @check_en: confirm if the FW is stopped
++ */
++static int himax_sense_off(struct himax_ts_data *ts, bool check_en)
++{
++	int ret;
++	u32 retry_cnt;
++	const u32 stop_fw_retry_limit = 35;
++	const u32 enter_safe_mode_retry_limit = 5;
++	const union himax_dword_data safe_mode = {
++		.dword = cpu_to_le32(HIMAX_REG_DATA_FW_GO_SAFEMODE)
++	};
++	union himax_dword_data data;
++
++	dev_info(ts->dev, "%s: check %s\n", __func__, check_en ? "True" : "False");
++	if (!check_en)
++		goto without_check;
++
++	for (retry_cnt = 0; retry_cnt < stop_fw_retry_limit; retry_cnt++) {
++		if (retry_cnt == 0 ||
++		    (data.byte[0] != HIMAX_REG_DATA_FW_GO_SAFEMODE &&
++		    data.byte[0] != HIMAX_REG_DATA_FW_RE_INIT &&
++		    data.byte[0] != HIMAX_REG_DATA_FW_IN_SAFEMODE)) {
++			ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_CTRL_FW,
++						       safe_mode.byte, 4);
++			if (ret < 0) {
++				dev_err(ts->dev, "%s: stop FW failed\n", __func__);
++				return ret;
++			}
++		}
++		usleep_range(10000, 11000);
++
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_FW_STATUS, data.byte, 4);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read central state failed\n", __func__);
++			return ret;
++		}
++		if (data.byte[0] != HIMAX_REG_DATA_FW_STATE_RUNNING) {
++			dev_info(ts->dev, "%s: Do not need wait FW, Status = 0x%02X!\n", __func__,
++			  data.byte[0]);
++			break;
++		}
++
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_CTRL_FW, data.byte, 4);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read ctrl FW failed\n", __func__);
++			return ret;
++		}
++		if (data.byte[0] == HIMAX_REG_DATA_FW_IN_SAFEMODE)
++			break;
++	}
++
++	if (data.byte[0] != HIMAX_REG_DATA_FW_IN_SAFEMODE)
++		dev_warn(ts->dev, "%s: Failed to stop FW!\n", __func__);
++
++without_check:
++	for (retry_cnt = 0; retry_cnt < enter_safe_mode_retry_limit; retry_cnt++) {
++		/* set Enter safe mode : 0x31 ==> 0x9527 */
++		data.word[0] = cpu_to_le16(HIMAX_HX83121A_SAFE_MODE_PASSWORD);
++		ret = himax_write(ts, HIMAX_AHB_ADDR_PSW_LB, NULL, data.byte, 2);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: enter safe mode failed\n", __func__);
++			return ret;
++		}
++
++		/* Check enter_save_mode */
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_FW_STATUS, data.byte, 4);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read central state failed\n", __func__);
++			return ret;
++		}
++
++		if (data.byte[0] == HIMAX_REG_DATA_FW_STATE_SAFE_MODE) {
++			dev_info(ts->dev, "%s: Safe mode entered\n", __func__);
++			return 0;
++		}
++
++		usleep_range(10000, 10100);
++		himax_pin_reset(ts);
++	}
++	dev_err(ts->dev, "%s: failed!\n", __func__);
++
++	return -EIO;
++}
++
++/**
++ * @sw_reset: true for software reset, false for hardware reset
++ *     true: write IC to leave safe mode
++ *     false: pin reset
++ *
++ * make MCU restart running the FW
++ */
++static int himax_sense_on(struct himax_ts_data *ts, bool sw_reset)
++{
++	int ret;
++	const union himax_dword_data re_init = {
++		.dword = cpu_to_le32(HIMAX_REG_DATA_FW_RE_INIT)
++	};
++	union himax_dword_data data;
++
++	ret = himax_mcu_interface_on(ts);
++	if (ret < 0)
++		return ret;
++
++	ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_CTRL_FW, re_init.byte, 4);
++	if (ret < 0)
++		return ret;
++	usleep_range(10000, 11000);
++	if (!sw_reset) {
++		himax_mcu_ic_reset(ts, false);
++	} else {
++		data.word[0] = cpu_to_le16(HIMAX_AHB_CMD_LEAVE_SAFE_MODE);
++		ret = himax_write(ts, HIMAX_AHB_ADDR_PSW_LB, NULL, data.byte, 2);
++		if (ret < 0)
++			return ret;
++	}
++	return 0;
++}
++
++int hx83121a_chip_detect(struct himax_ts_data *ts)
++{
++	int ret;
++	u32 retry_cnt;
++	const u32 read_icid_retry_limit = 5;
++	union himax_dword_data data;
++
++	himax_pin_reset(ts);
++
++	ret = himax_mcu_interface_on(ts);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: read ahb_addr_conti failed\n", __func__);
++		return ret;
++	}
++
++	ret = himax_sense_off(ts, false);
++	if (ret)
++		return ret;
++
++	for (retry_cnt = 0; retry_cnt < read_icid_retry_limit; retry_cnt++) {
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_ICID, data.byte, 4);
++		if (ret) {
++			dev_err(ts->dev, "%s: Read IC ID Fail\n", __func__);
++			return ret;
++		}
++
++		data.dword = le32_to_cpu(data.dword) >> 8;
++		dev_info(ts->dev, "Detected IC HX%06X\n", data.dword);
++
++		if (data.dword == 0x83121a)
++			return 0;
++	}
++	return -ENODEV;
++}
++
++int himax_verify_running_ic(struct himax_ts_data *ts)
++{
++	union himax_dword_data data;
++	int ret;
++
++	ret = himax_mcu_interface_on(ts);
++	if (ret)
++		return ret;
++	ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_ICID, data.byte,
++				      sizeof(data.byte));
++	if (ret)
++		return ret;
++	if ((le32_to_cpu(data.dword) >> 8) != 0x83121a)
++		return -ENODEV;
++
++	return 0;
++}
++
++int himax_restore_raw_runtime(struct himax_ts_data *ts)
++{
++	union himax_dword_data password = {
++		.dword = cpu_to_le32(0x00005aa5),
++	};
++	int ret;
++	int supplied;
++
++	/* These are firmware-owned runtime values.  Xiaomi similarly replays its
++	 * USB/gesture/touch-mode values after resume; our raw-matrix transport
++	 * additionally needs RawOut and the SRAM producer handshake.
++	 */
++	ret = himax_mcu_write_verify_u32(ts,
++		HIMAX_DSRAM_ADDR_AP_NOTIFY_FW_SUSPEND,
++		HIMAX_DSRAM_DATA_AP_RESUMED, 3);
++	if (ret)
++		return ret;
++	ret = himax_mcu_write_verify_u32(ts,
++		HIMAX_DSRAM_ADDR_SORTING_MODE_EN, HIMAX_DATA_CLEAR, 3);
++	if (ret)
++		return ret;
++	ret = himax_mcu_write_verify_u32(ts, HIMAX_DSRAM_ADDR_SET_NFRAME,
++					 1, 3);
++	if (ret)
++		return ret;
++	ret = himax_mcu_write_verify_u32(ts,
++		HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL, 0xf6, 3);
++	if (ret)
++		return ret;
++
++	/* dagu replays charger state after every resume to select the firmware's
++	 * anti-USB-interference profile.  It is supplementary to our host-side
++	 * common-mode filter, not a replacement for it.
++	 */
++	supplied = power_supply_is_system_supplied();
++	if (supplied >= 0) {
++		ret = himax_mcu_write_verify_u32(ts,
++			HIMAX_DSRAM_ADDR_USB_DETECT,
++			supplied ? HIMAX_DSRAM_DATA_USB_CONNECTED : 0, 3);
++		if (ret)
++			dev_warn(ts->dev,
++				 "failed to replay charger interference mode: %d\n",
++				 ret);
++	}
++
++	/* The password is a producer/consumer handshake, not persistent config;
++	 * firmware may consume it immediately, so an equality readback would be
++	 * incorrect.  Validate it through fresh master event frames below.
++	 */
++	return himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD,
++					password.byte, sizeof(password.byte));
++}
++
++static int himax_mcu_assign_sorting_mode(struct himax_ts_data *ts, u8 *tmp_data_in)
++{
++	int ret;
++	u8 rdata[4];
++	u32 retry_cnt;
++	const u32 retry_limit = 3;
++
++	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
++		ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_SORTING_MODE_EN,
++					       tmp_data_in, HIMAX_REG_SZ);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: write sorting mode fail\n", __func__);
++			return ret;
++		}
++		usleep_range(1000, 1100);
++		ret = himax_mcu_register_read(ts, HIMAX_DSRAM_ADDR_SORTING_MODE_EN,
++					      rdata, HIMAX_REG_SZ);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read sorting mode fail\n", __func__);
++			return ret;
++		}
++
++		if (!memcmp(tmp_data_in, rdata, HIMAX_REG_SZ))
++			return 0;
++	}
++	dev_err(ts->dev, "%s: fail to write sorting mode\n", __func__);
++
++	return -EINVAL;
++}
++
++/* Match the Windows Chip::Init() resume path: every hardware reinit must
++ * explicitly allow the controller to rebuild its runtime state from flash.
++ * Keeping 0x5aa5 ("has flash, but not reload") across a reset can leave a
++ * partially retained firmware state after display sleep.
++ */
++int himax_enable_fw_reload(struct himax_ts_data *ts)
++{
++	union himax_dword_data data = { .dword = cpu_to_le32(0) };
++
++	/* This flag is firmware-owned once sensing restarts, so mirror Windows and
++	 * verify success through the subsequent 0x72c0 reload-done handshake.
++	 */
++	return himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_FLASH_RELOAD,
++					data.byte, 4);
++}
++
++int himax_mcu_power_on_init(struct himax_ts_data *ts)
++{
++	int ret;
++	u32 retry_cnt;
++	const u32 retry_limit = 30;
++	union himax_dword_data data;
++
++	data.dword = cpu_to_le32(HIMAX_DATA_CLEAR);
++	/* Initial sorting mode password to normal mode */
++	ret = himax_mcu_assign_sorting_mode(ts, data.byte);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: assign sorting mode fail\n", __func__);
++		return ret;
++	}
++
++	/* Restore the firmware normal-mode N-frame value. */
++	data.dword = cpu_to_le32(1);
++	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_SET_NFRAME, data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: set N frame fail\n", __func__);
++		return ret;
++	}
++
++	/* Clear firmware reload status before leaving safe mode. */
++	data.dword = cpu_to_le32(HIMAX_DATA_CLEAR);
++	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD, data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: initial FW reload status fail\n", __func__);
++		return ret;
++	}
++
++	ret = himax_sense_on(ts, false);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: sense on fail\n", __func__);
++		return ret;
++	}
++
++	/* Windows waits for central-state A8 == 0x05 before trusting reload
++	 * state.  A responsive bus alone does not mean firmware boot completed.
++	 */
++	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_FW_STATUS,
++					      data.byte, 4);
++		if (ret < 0)
++			return ret;
++		if (data.byte[0] == HIMAX_REG_DATA_FW_STATE_RUNNING)
++			break;
++		usleep_range(10000, 11000);
++	}
++	if (retry_cnt == retry_limit) {
++		dev_err(ts->dev, "%s: FW did not enter running state\n", __func__);
++		return -ETIMEDOUT;
++	}
++
++	dev_info(ts->dev, "%s: waiting for FW reload data\n", __func__);
++	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
++		ret = himax_mcu_register_read(ts, HIMAX_DSRAM_ADDR_2ND_FLASH_RELOAD, data.byte, 4);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read FW reload status fail\n", __func__);
++			return ret;
++		}
++
++		if (le32_to_cpu(data.dword) == HIMAX_DSRAM_DATA_FW_RELOAD_DONE) {
++			dev_info(ts->dev, "%s: FW reload done\n", __func__);
++			break;
++		}
++		dev_info(ts->dev, "%s: wait FW reload %u times\n", __func__, retry_cnt + 1);
++
++		usleep_range(10000, 11000);
++	}
++
++	if (retry_cnt == retry_limit) {
++		dev_err(ts->dev, "%s: FW reload fail!\n", __func__);
++		return -EINVAL;
++	}
++
++	/* RawOut select for this panel configuration. */
++	data.dword = cpu_to_le32(0xf6);
++	ret = himax_mcu_register_write(ts, HIMAX_HX83121A_DSRAM_ADDR_RAW_OUT_SEL, data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: set RawOut select fail\n", __func__);
++		return ret;
++	}
++
++	/* Windows re-arms the raw-data SRAM handshake after every reload.  The
++	 * SPI transport has one controller-facing endpoint, so only the master
++	 * password is applicable here.
++	 */
++	data.dword = cpu_to_le32(0x00005aa5);
++	ret = himax_mcu_register_write(ts, HIMAX_DSRAM_ADDR_RAWDATA_PASSWORD,
++				       data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: set raw-data password fail\n", __func__);
++		return ret;
++	}
++
++	return 0;
++}
++
++int himax_mcu_check_crc(struct himax_ts_data *ts, u32 start_addr,
++			int reload_length, u32 *crc_result)
++{
++	int ret;
++	int length = reload_length / HIMAX_REG_SZ;
++	u32 retry_cnt;
++	const u32 retry_limit = 100;
++	union himax_dword_data data, addr;
++
++	addr.dword = cpu_to_le32(start_addr);
++	ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_RELOAD_ADDR_FROM, addr.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: write reload start address fail\n", __func__);
++		return ret;
++	}
++
++	data.word[1] = cpu_to_le16(HIMAX_REG_DATA_RELOAD_PASSWORD);
++	data.word[0] = cpu_to_le16(length);
++	ret = himax_mcu_register_write(ts, HIMAX_REG_ADDR_RELOAD_ADDR_CMD_BEAT, data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: write reload length and password fail!\n", __func__);
++		return ret;
++	}
++
++	ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_RELOAD_ADDR_CMD_BEAT, data.byte, 4);
++	if (ret < 0) {
++		dev_err(ts->dev, "%s: read reload length and password fail!\n", __func__);
++		return ret;
++	}
++
++	if (le16_to_cpu(data.word[0]) != length) {
++		dev_err(ts->dev, "%s: length verify failed!\n", __func__);
++		return -EINVAL;
++	}
++
++	for (retry_cnt = 0; retry_cnt < retry_limit; retry_cnt++) {
++		ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_RELOAD_STATUS, data.byte, 4);
++		if (ret < 0) {
++			dev_err(ts->dev, "%s: read reload status fail!\n", __func__);
++			return ret;
++		}
++
++		data.dword = le32_to_cpu(data.dword);
++		if ((data.byte[0] & HIMAX_REG_DATA_RELOAD_DONE) != HIMAX_REG_DATA_RELOAD_DONE) {
++			ret = himax_mcu_register_read(ts, HIMAX_REG_ADDR_RELOAD_CRC32_RESULT,
++						      data.byte, HIMAX_REG_SZ);
++			if (ret < 0) {
++				dev_err(ts->dev, "%s: read crc32 result fail!\n", __func__);
++				return ret;
++			}
++			*crc_result = le32_to_cpu(data.dword);
++			return 0;
++		}
++
++		dev_info(ts->dev, "%s: Waiting for HW ready!\n", __func__);
++		usleep_range(1000, 1100);
++	}
++
++	dev_err(ts->dev, "%s: read FW status fail\n", __func__);
++	return -EINVAL;
++}
+diff --git a/drivers/input/touchscreen/himax-spi-sysfs.c b/drivers/input/touchscreen/himax-spi-sysfs.c
+new file mode 100644
+index 000000000..9bf80e7ef
+--- /dev/null
++++ b/drivers/input/touchscreen/himax-spi-sysfs.c
+@@ -0,0 +1,684 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Sysfs controls and optional diagnostic tracing for HX83121A. */
++
++#include <linux/slab.h>
++#include <linux/sysfs.h>
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++#include <linux/timekeeping.h>
++#endif
++
++#include "himax-spi.h"
++
++static ssize_t inplace_reset_store(struct device *dev,
++				   struct device_attribute *attr,
++				   const char *buf, size_t count)
++{
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	bool do_reset;
++	int ret;
++
++	ret = kstrtobool(buf, &do_reset);
++	if (ret)
++		return ret;
++
++	if (!do_reset)
++		return count;
++
++	ret = himax_manual_reset(ts);
++	if (ret)
++		return ret;
++
++	return count;
++}
++
++static DEVICE_ATTR_WO(inplace_reset);
++
++/* ---- sysfs: algo parameter group ---- */
++
++#define HX_ALGO_ATTR_BOOL_RW(_name)					\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	return sysfs_emit(buf, "%d\n", ts->algo->_name ? 1 : 0);	\
++}									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	bool val;							\
++	int ret = kstrtobool(buf, &val);				\
++	if (ret)							\
++		return ret;						\
++	mutex_lock(&ts->op_lock);				\
++	ts->algo->_name = val;						\
++	mutex_unlock(&ts->op_lock);				\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++#define HX_ALGO_ATTR_S16_RW(_name, _min, _max)				\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	return sysfs_emit(buf, "%d\n", (int)ts->algo->_name);		\
++}									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	s16 val;							\
++	int ret = kstrtos16(buf, 0, &val);				\
++	if (ret)							\
++		return ret;						\
++	if (val < (_min) || val > (_max))				\
++		return -ERANGE;						\
++	mutex_lock(&ts->op_lock);				\
++	ts->algo->_name = val;						\
++	mutex_unlock(&ts->op_lock);				\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++#define HX_ALGO_ATTR_U16_RW(_name, _min, _max)				\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	return sysfs_emit(buf, "%u\n", (unsigned int)ts->algo->_name);	\
++}									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	u16 val;							\
++	int ret = kstrtou16(buf, 0, &val);				\
++	if (ret)							\
++		return ret;						\
++	if (val < (_min) || val > (_max))				\
++		return -ERANGE;						\
++	mutex_lock(&ts->op_lock);				\
++	ts->algo->_name = val;						\
++	mutex_unlock(&ts->op_lock);				\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++#define HX_ALGO_ATTR_U8_RW(_name, _min, _max)				\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	return sysfs_emit(buf, "%u\n", (unsigned int)ts->algo->_name);	\
++}									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	u8 val;							\
++	int ret = kstrtou8(buf, 0, &val);				\
++	if (ret)							\
++		return ret;						\
++	if (val < (_min) || val > (_max))				\
++		return -ERANGE;						\
++	mutex_lock(&ts->op_lock);				\
++	ts->algo->_name = val;						\
++	mutex_unlock(&ts->op_lock);				\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++#define HX_ALGO_ATTR_S32_RW(_name, _min, _max)				\
++static ssize_t _name##_show(struct device *dev,				\
++			    struct device_attribute *attr, char *buf)	\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	return sysfs_emit(buf, "%d\n", ts->algo->_name);		\
++}									\
++static ssize_t _name##_store(struct device *dev,			\
++			     struct device_attribute *attr,		\
++			     const char *buf, size_t count)		\
++{									\
++	struct himax_ts_data *ts = dev_get_drvdata(dev);		\
++	s32 val;							\
++	int ret = kstrtos32(buf, 0, &val);				\
++	if (ret)							\
++		return ret;						\
++	if (val < (_min) || val > (_max))				\
++		return -ERANGE;						\
++	mutex_lock(&ts->op_lock);				\
++	ts->algo->_name = val;						\
++	mutex_unlock(&ts->op_lock);				\
++	return count;							\
++}									\
++static DEVICE_ATTR_RW(_name)
++
++/* Preprocessing */
++HX_ALGO_ATTR_BOOL_RW(baseline_enabled);
++HX_ALGO_ATTR_S16_RW(baseline_noise_deadband, 0, 200);
++HX_ALGO_ATTR_S16_RW(baseline_peak_threshold, 1, 2000);
++HX_ALGO_ATTR_U8_RW(baseline_release_hold_frames, 0, 255);
++HX_ALGO_ATTR_U8_RW(baseline_background_alpha_shift, 0, 15);
++HX_ALGO_ATTR_U8_RW(baseline_no_finger_alpha_shift, 0, 15);
++HX_ALGO_ATTR_U8_RW(baseline_recovery_alpha_shift, 0, 15);
++HX_ALGO_ATTR_S16_RW(baseline_background_max_step, 1, 2048);
++HX_ALGO_ATTR_S16_RW(baseline_no_finger_max_step, 1, 2048);
++HX_ALGO_ATTR_S16_RW(baseline_recovery_max_step, 1, 2048);
++HX_ALGO_ATTR_U8_RW(baseline_recovery_max_frames, 1, 120);
++HX_ALGO_ATTR_BOOL_RW(baseline_noise_tracking);
++HX_ALGO_ATTR_U8_RW(wake_stable_frames, 2, 30);
++HX_ALGO_ATTR_U8_RW(wake_finger_safe_frames, 1, 15);
++HX_ALGO_ATTR_S16_RW(wake_raw_jump_threshold, 1, 4095);
++HX_ALGO_ATTR_U16_RW(wake_max_unstable_nodes, 0, HX_PIXELS);
++HX_ALGO_ATTR_U8_RW(wake_max_unstable_line_nodes, 1, HX_ROWS);
++HX_ALGO_ATTR_U8_RW(safe_commit_no_finger_frames, 1, 240);
++HX_ALGO_ATTR_S16_RW(runtime_noise_threshold, 1, 8192);
++HX_ALGO_ATTR_U8_RW(runtime_noise_line_nodes, 1, HX_COLS);
++HX_ALGO_ATTR_U16_RW(runtime_noise_total_nodes, 1, HX_PIXELS);
++HX_ALGO_ATTR_BOOL_RW(cmf_enabled);
++HX_ALGO_ATTR_S16_RW(cmf_exclusion, 0, 32767);
++HX_ALGO_ATTR_S16_RW(cmf_max_correction, 0, 32767);
++HX_ALGO_ATTR_BOOL_RW(iir_enabled);
++HX_ALGO_ATTR_U16_RW(iir_decay_weight, 0, 256);
++HX_ALGO_ATTR_U16_RW(iir_decay_step, 0, 4095);
++HX_ALGO_ATTR_S16_RW(iir_noise_floor, 0, 4095);
++HX_ALGO_ATTR_S16_RW(iir_gate_floor, 0, 4095);
++HX_ALGO_ATTR_U8_RW(iir_gate_ratio_q8, 0, 255);
++/* Detection */
++HX_ALGO_ATTR_S16_RW(macro_threshold, 1, 4095);
++HX_ALGO_ATTR_S16_RW(peak_threshold, 1, 4095);
++HX_ALGO_ATTR_U8_RW(peak_local_radius, 1, 5);
++HX_ALGO_ATTR_BOOL_RW(peak_z8_enabled);
++HX_ALGO_ATTR_BOOL_RW(peak_saddle_enabled);
++HX_ALGO_ATTR_U8_RW(peak_saddle_radius, 1, 8);
++HX_ALGO_ATTR_S16_RW(peak_saddle_drop, 0, 4095);
++HX_ALGO_ATTR_S16_RW(peak_signal_threshold_limit, 1, 4095);
++HX_ALGO_ATTR_S16_RW(peak_edge_threshold, 0, 4095);
++HX_ALGO_ATTR_U8_RW(peak_macro_min_area, 1, 64);
++HX_ALGO_ATTR_U8_RW(peak_continue_min_area, 1, 2);
++HX_ALGO_ATTR_S16_RW(peak_continue_min_signal, 1, 4095);
++HX_ALGO_ATTR_S16_RW(peak_single_track_continue_min_signal, 1, 4095);
++HX_ALGO_ATTR_S32_RW(peak_continue_dist2, 1, 1000000);
++HX_ALGO_ATTR_S16_RW(peak_fast_start_min_signal, 1, 4095);
++HX_ALGO_ATTR_U8_RW(peak_fast_start_edge_cells, 1, 16);
++HX_ALGO_ATTR_BOOL_RW(palm_enabled);
++HX_ALGO_ATTR_U8_RW(palm_area_threshold, 0, 250);
++HX_ALGO_ATTR_S32_RW(palm_signal_threshold, 0, 1000000);
++HX_ALGO_ATTR_S16_RW(palm_density_low, 0, 4095);
++HX_ALGO_ATTR_BOOL_RW(palm_box_enabled);
++HX_ALGO_ATTR_U8_RW(palm_box_expand_rows, 0, 10);
++HX_ALGO_ATTR_U8_RW(palm_box_expand_cols, 0, 10);
++HX_ALGO_ATTR_U8_RW(palm_box_match_distance, 0, 30);
++HX_ALGO_ATTR_U16_RW(palm_box_max_hold, 0, 300);
++HX_ALGO_ATTR_BOOL_RW(zone_cleanup_enabled);
++HX_ALGO_ATTR_U8_RW(zone_max_radius, 0, 16);
++HX_ALGO_ATTR_U8_RW(zone_threshold_numer, 0, 255);
++HX_ALGO_ATTR_U8_RW(zone_threshold_shift, 0, 15);
++/* Pressure / touch-major reporting */
++HX_ALGO_ATTR_BOOL_RW(pressure_enabled);
++/* Edge compensation */
++HX_ALGO_ATTR_BOOL_RW(edge_comp_enabled);
++HX_ALGO_ATTR_S16_RW(edge_boost_pct, 0, 200);
++HX_ALGO_ATTR_S16_RW(edge_push_q8, 0, 1280);
++HX_ALGO_ATTR_S16_RW(edge_blend_q8, 1, 1280);
++HX_ALGO_ATTR_BOOL_RW(edge_reject_enabled);
++HX_ALGO_ATTR_U16_RW(edge_reject_margin, 0, 256);
++HX_ALGO_ATTR_S32_RW(edge_reject_min_signal, 0, 1000000);
++/* Tracking */
++HX_ALGO_ATTR_S32_RW(track_dist2_max, 1, 16777216);
++HX_ALGO_ATTR_U8_RW(track_lost_frames, 1, 16);
++HX_ALGO_ATTR_U8_RW(debounce_base, 0, 16);
++HX_ALGO_ATTR_BOOL_RW(track_smoothing);
++HX_ALGO_ATTR_BOOL_RW(track_active_guard);
++HX_ALGO_ATTR_U8_RW(track_start_debounce, 0, 16);
++HX_ALGO_ATTR_S32_RW(track_jump_dist2, 0, 16777216);
++HX_ALGO_ATTR_BOOL_RW(hungarian_enabled);
++HX_ALGO_ATTR_U8_RW(debounce_weak_extra, 0, 16);
++HX_ALGO_ATTR_U8_RW(debounce_edge_extra, 0, 16);
++HX_ALGO_ATTR_S32_RW(debounce_strong_signal, 0, 1000000);
++HX_ALGO_ATTR_BOOL_RW(firmware_edge_fast_start);
++HX_ALGO_ATTR_U8_RW(split_peak_confirm_frames, 1, 16);
++HX_ALGO_ATTR_S32_RW(split_peak_dist2, 1, 1000000);
++HX_ALGO_ATTR_U8_RW(split_cross_zone_confirm_frames, 1, 16);
++HX_ALGO_ATTR_S32_RW(split_cross_zone_dist2, 1, 1000000);
++HX_ALGO_ATTR_S32_RW(track_peak_id_penalty, 0, 16777216);
++HX_ALGO_ATTR_BOOL_RW(ghost_enabled);
++HX_ALGO_ATTR_U16_RW(ghost_row_distance, 0, 512);
++HX_ALGO_ATTR_U8_RW(ghost_weak_ratio_q8, 0, 255);
++HX_ALGO_ATTR_U16_RW(ghost_min_col_distance, 0, 4096);
++HX_ALGO_ATTR_BOOL_RW(euro_enabled);
++HX_ALGO_ATTR_U8_RW(euro_alpha_min_q8, 1, 255);
++HX_ALGO_ATTR_U8_RW(euro_alpha_max_q8, 1, 255);
++HX_ALGO_ATTR_U16_RW(euro_speed_threshold, 1, 4096);
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++static ssize_t diagnostics_show(struct device *dev,
++				struct device_attribute *attr, char *buf)
++{
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	struct hx_algo *a = ts->algo;
++	ssize_t len = 0;
++
++	mutex_lock(&ts->op_lock);
++	len += sysfs_emit_at(buf, len, "frame=%u common=%d max=%d signal=%u ",
++			     a->diag_frame_seq, a->diag_common_diff,
++			     a->diag_frame_max, a->diag_has_signal);
++	len += sysfs_emit_at(buf, len, "zones=%u peaks=%u contacts_pre=%u ",
++			     a->diag_zones, a->diag_peaks,
++			     a->diag_contacts_pre_filter);
++	len += sysfs_emit_at(buf, len, "contacts_post=%u active=%u reported=%u ",
++			     a->diag_contacts_post_filter,
++			     a->diag_active_tracks, a->diag_reported_tracks);
++	len += sysfs_emit_at(buf, len,
++			     "baseline_generation=%u full_resets=%u live_clears=%u ",
++			     a->baseline_generation, a->full_reset_count,
++			     a->live_clear_count);
++	len += sysfs_emit_at(buf, len,
++			     "cold_inits=%u warm_resumes=%u warm_fallbacks=%u ",
++			     ts->cold_init_count, ts->warm_resume_count,
++			     ts->warm_resume_fallback_count);
++	len += sysfs_emit_at(buf, len,
++			     "resume_stability_failures=%u afe_calibrations=%u ",
++			     ts->resume_stability_failures,
++			     ts->afe_calibration_count);
++	len += sysfs_emit_at(buf, len,
++			     "afe_calibration_failures=%u full_resume=%u ",
++			     ts->afe_calibration_failures,
++			     himax_full_resume_enabled());
++	len += sysfs_emit_at(buf, len,
++			     "wake_qualifications=%u wake_candidate_rejects=%u ",
++			     a->wake_qualification_count,
++			     a->wake_candidate_reject_count);
++	len += sysfs_emit_at(buf, len,
++			     "wake_safe_fallbacks=%u wake_baseline_commits=%u ",
++			     a->wake_safe_fallback_count,
++			     a->wake_baseline_commit_count);
++	len += sysfs_emit_at(buf, len,
++			     "wake_safe_divergences=%u safe_baseline_commits=%u ",
++			     a->wake_safe_divergence_count,
++			     a->baseline_safe_commit_count);
++	len += sysfs_emit_at(buf, len,
++			     "noise_frame_holds=%u small_peak_continued=%u ",
++			     a->noise_frame_hold_count,
++			     a->diag_small_peak_continued);
++	len += sysfs_emit_at(buf, len,
++			     "weak_peak_continued=%u small_peak_rejected=%u ",
++			     a->diag_weak_peak_continued,
++			     a->diag_small_peak_rejected);
++	len += sysfs_emit_at(buf, len,
++			     "split_peak_deferred=%u cross_zone_split_deferred=%u ",
++			     a->diag_split_peak_deferred,
++			     a->diag_cross_zone_split_deferred);
++	len += sysfs_emit_at(buf, len,
++			     "peak_id_handoffs=%u handoff_residual_deferred=%u ",
++			     a->diag_peak_id_handoffs,
++			     a->diag_handoff_residual_deferred);
++	len += sysfs_emit_at(buf, len, "fast_edge_starts=%u\n",
++			     a->diag_fast_edge_starts);
++	mutex_unlock(&ts->op_lock);
++	return len;
++}
++static DEVICE_ATTR_RO(diagnostics);
++
++/*
++ * A bounded, read-only snapshot of the most recently received event stack.
++ * This is intentionally exposed as hex rather than as a binary sysfs file so
++ * an unprivileged diagnostic helper can preserve it without a custom ioctl.
++ * The buffer is protected by op_lock, just like diagnostics_show().
++ */
++static ssize_t event_stack_hex_show(struct device *dev,
++					struct device_attribute *attr, char *buf)
++{
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	ssize_t len = 0;
++	u32 i;
++
++	mutex_lock(&ts->op_lock);
++	for (i = 0; i < ts->event_buf_sz && len < PAGE_SIZE - 3; i++)
++		len += sysfs_emit_at(buf, len, "%02x%s", ts->event_buf[i],
++					(i + 1) % 32 ? "" : "\n");
++	if (len && buf[len - 1] != '\n' && len < PAGE_SIZE - 1)
++		buf[len++] = '\n';
++	mutex_unlock(&ts->op_lock);
++	return len;
++}
++static DEVICE_ATTR_RO(event_stack_hex);
++
++/* Full last-good event stack.  Reads are snapshots only; no SPI I/O occurs. */
++static ssize_t event_stack_read(struct file *file, struct kobject *kobj,
++				const struct bin_attribute *attr, char *buf,
++				loff_t offset, size_t count)
++{
++	struct device *dev = kobj_to_dev(kobj);
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	size_t available;
++
++	if (offset < 0 || offset >= ts->event_buf_sz)
++		return 0;
++
++	available = ts->event_buf_sz - offset;
++	count = min(count, available);
++
++	mutex_lock(&ts->op_lock);
++	memcpy(buf, ts->event_buf + offset, count);
++	mutex_unlock(&ts->op_lock);
++
++	return count;
++}
++
++static const struct bin_attribute event_stack_attr = {
++	.attr = {
++		.name = "event_stack",
++		.mode = 0444,
++	},
++	.size = HIMAX_FULL_EVENT_STACK_SIZE,
++	.read = event_stack_read,
++};
++
++void himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
++			    bool master_valid,
++			    const struct hx_frame_status *frame_status,
++			    bool noise_hold)
++{
++	struct himax_trace_record *record;
++	struct hx_algo *algo = ts->algo;
++	u32 flags = 0;
++	int i;
++
++	if (!ts->trace_ring || !algo)
++		return;
++
++	record = &ts->trace_ring[ts->trace_write_index];
++	memset(record, 0, sizeof(*record));
++	record->boottime_ns = cpu_to_le64(ktime_get_boottime_ns());
++	record->irq_sequence = cpu_to_le32(++ts->trace_irq_sequence);
++	record->reset_generation = cpu_to_le32(ts->reset_generation);
++	record->read_error = cpu_to_le32((u32)read_error);
++
++	if (!read_error)
++		flags |= HIMAX_TRACE_F_READ_OK;
++	if (master_valid)
++		flags |= HIMAX_TRACE_F_MASTER_VALID;
++	if (master_valid && frame_status->retry)
++		flags |= HIMAX_TRACE_F_RETRY;
++	if (master_valid && frame_status->has_finger)
++		flags |= HIMAX_TRACE_F_HAS_FINGER;
++	if (noise_hold)
++		flags |= HIMAX_TRACE_F_NOISE_HOLD;
++	record->flags = cpu_to_le32(flags);
++
++	record->algo_frame_sequence = cpu_to_le32(algo->diag_frame_seq);
++	record->common_diff = cpu_to_le32((u32)algo->diag_common_diff);
++	record->frame_max = cpu_to_le16((u16)algo->diag_frame_max);
++	record->has_signal = algo->diag_has_signal;
++	record->zones = algo->diag_zones;
++	record->peaks = algo->diag_peaks;
++	record->contacts_pre = algo->diag_contacts_pre_filter;
++	record->contacts_post = algo->diag_contacts_post_filter;
++	record->active_tracks = algo->diag_active_tracks;
++	record->reported_tracks = algo->diag_reported_tracks;
++
++	for (i = 0; i < min_t(int, algo->peak_count, HX_MAX_PEAKS); i++) {
++		record->peak[i].row = algo->peaks[i].r;
++		record->peak[i].col = algo->peaks[i].c;
++		record->peak[i].signal = cpu_to_le16((u16)algo->peaks[i].z);
++		record->peak[i].zone_area = cpu_to_le16(algo->peaks[i].zone_area);
++		record->peak[i].zone_index = algo->peaks[i].zone_index;
++		record->peak[i].flags = algo->peaks[i].on_edge ? BIT(0) : 0;
++		record->peak[i].id = algo->peaks[i].id;
++		record->peak[i].age = algo->peaks[i].age;
++	}
++
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++		const struct hx_track *track = &algo->tracks[i];
++
++		record->track[i].flags = (track->active ? BIT(0) : 0) |
++					 (track->reported ? BIT(1) : 0);
++		record->track[i].age = track->age;
++		record->track[i].missed = track->missed;
++		record->track[i].debounce = track->debounce;
++		record->track[i].source_peak_id = track->source_peak_id;
++		record->track[i].source_peak_age = track->source_peak_age;
++		record->track[i].x = cpu_to_le32((u32)track->x);
++		record->track[i].y = cpu_to_le32((u32)track->y);
++		record->track[i].vx = cpu_to_le32((u32)track->vx);
++		record->track[i].vy = cpu_to_le32((u32)track->vy);
++		record->track[i].signal_sum = cpu_to_le32((u32)track->signal_sum);
++		record->track[i].filtered_x_q8 =
++			cpu_to_le32((u32)track->filtered_x_q8);
++		record->track[i].filtered_y_q8 =
++			cpu_to_le32((u32)track->filtered_y_q8);
++		record->track[i].deriv_x_q8 = cpu_to_le32((u32)track->deriv_x_q8);
++		record->track[i].deriv_y_q8 = cpu_to_le32((u32)track->deriv_y_q8);
++	}
++
++	if (master_valid && !frame_status->retry) {
++		for (i = 0; i < HX_PIXELS; i++)
++			record->processed_frame[i] =
++				cpu_to_le16((u16)((s16 *)algo->frame)[i]);
++	}
++	if (!read_error)
++		memcpy(record->event_stack, ts->event_buf, ts->event_buf_sz);
++
++	ts->trace_write_index =
++		(ts->trace_write_index + 1) % HIMAX_TRACE_CAPACITY;
++	if (ts->trace_count < HIMAX_TRACE_CAPACITY)
++		ts->trace_count++;
++}
++
++static void himax_trace_build_snapshot(struct himax_ts_data *ts)
++{
++	struct himax_trace_header *header;
++	u32 count = ts->trace_count;
++	u32 start;
++	u32 i;
++
++	header = (struct himax_trace_header *)ts->trace_snapshot;
++	memset(header, 0, sizeof(*header));
++	header->magic = cpu_to_le32(HIMAX_TRACE_MAGIC);
++	header->version = cpu_to_le16(HIMAX_TRACE_VERSION);
++	header->header_size = cpu_to_le16(sizeof(*header));
++	header->record_size = cpu_to_le32(sizeof(struct himax_trace_record));
++	header->capacity = cpu_to_le32(HIMAX_TRACE_CAPACITY);
++	header->count = cpu_to_le32(count);
++	header->snapshot_boottime_ns = cpu_to_le64(ktime_get_boottime_ns());
++	header->reset_generation = cpu_to_le64(ts->reset_generation);
++
++	start = (ts->trace_write_index + HIMAX_TRACE_CAPACITY - count) %
++		HIMAX_TRACE_CAPACITY;
++	for (i = 0; i < count; i++) {
++		void *dst = ts->trace_snapshot + sizeof(*header) +
++			i * sizeof(struct himax_trace_record);
++		u32 src = (start + i) % HIMAX_TRACE_CAPACITY;
++
++		memcpy(dst, &ts->trace_ring[src], sizeof(struct himax_trace_record));
++	}
++	ts->trace_snapshot_len = sizeof(*header) +
++		count * sizeof(struct himax_trace_record);
++}
++
++static ssize_t event_trace_read(struct file *file, struct kobject *kobj,
++				const struct bin_attribute *attr, char *buf,
++				loff_t offset, size_t count)
++{
++	struct device *dev = kobj_to_dev(kobj);
++	struct himax_ts_data *ts = dev_get_drvdata(dev);
++	size_t available;
++
++	mutex_lock(&ts->op_lock);
++	if (offset == 0)
++		himax_trace_build_snapshot(ts);
++	if (offset < 0 || offset >= ts->trace_snapshot_len) {
++		count = 0;
++		goto out_unlock;
++	}
++
++	available = ts->trace_snapshot_len - offset;
++	count = min(count, available);
++	memcpy(buf, ts->trace_snapshot + offset, count);
++
++out_unlock:
++	mutex_unlock(&ts->op_lock);
++	return count;
++}
++
++static const struct bin_attribute event_trace_attr = {
++	.attr = {
++		.name = "event_trace",
++		.mode = 0444,
++	},
++	.size = sizeof(struct himax_trace_header) +
++		HIMAX_TRACE_CAPACITY * sizeof(struct himax_trace_record),
++	.read = event_trace_read,
++};
++#endif
++
++static struct attribute *hx_algo_attrs[] = {
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	&dev_attr_diagnostics.attr,
++	&dev_attr_event_stack_hex.attr,
++#endif
++	&dev_attr_baseline_enabled.attr,
++	&dev_attr_baseline_noise_deadband.attr,
++	&dev_attr_baseline_peak_threshold.attr,
++	&dev_attr_baseline_release_hold_frames.attr,
++	&dev_attr_baseline_background_alpha_shift.attr,
++	&dev_attr_baseline_no_finger_alpha_shift.attr,
++	&dev_attr_baseline_recovery_alpha_shift.attr,
++	&dev_attr_baseline_background_max_step.attr,
++	&dev_attr_baseline_no_finger_max_step.attr,
++	&dev_attr_baseline_recovery_max_step.attr,
++	&dev_attr_baseline_recovery_max_frames.attr,
++	&dev_attr_baseline_noise_tracking.attr,
++	&dev_attr_wake_stable_frames.attr,
++	&dev_attr_wake_finger_safe_frames.attr,
++	&dev_attr_wake_raw_jump_threshold.attr,
++	&dev_attr_wake_max_unstable_nodes.attr,
++	&dev_attr_wake_max_unstable_line_nodes.attr,
++	&dev_attr_safe_commit_no_finger_frames.attr,
++	&dev_attr_runtime_noise_threshold.attr,
++	&dev_attr_runtime_noise_line_nodes.attr,
++	&dev_attr_runtime_noise_total_nodes.attr,
++	&dev_attr_cmf_enabled.attr,
++	&dev_attr_cmf_exclusion.attr,
++	&dev_attr_cmf_max_correction.attr,
++	&dev_attr_iir_enabled.attr,
++	&dev_attr_iir_decay_weight.attr,
++	&dev_attr_iir_decay_step.attr,
++	&dev_attr_iir_noise_floor.attr,
++	&dev_attr_iir_gate_floor.attr,
++	&dev_attr_iir_gate_ratio_q8.attr,
++	&dev_attr_macro_threshold.attr,
++	&dev_attr_peak_threshold.attr,
++	&dev_attr_peak_local_radius.attr,
++	&dev_attr_peak_z8_enabled.attr,
++	&dev_attr_peak_saddle_enabled.attr,
++	&dev_attr_peak_saddle_radius.attr,
++	&dev_attr_peak_saddle_drop.attr,
++	&dev_attr_peak_signal_threshold_limit.attr,
++	&dev_attr_peak_edge_threshold.attr,
++	&dev_attr_peak_macro_min_area.attr,
++	&dev_attr_peak_continue_min_area.attr,
++	&dev_attr_peak_continue_min_signal.attr,
++	&dev_attr_peak_single_track_continue_min_signal.attr,
++	&dev_attr_peak_continue_dist2.attr,
++	&dev_attr_peak_fast_start_min_signal.attr,
++	&dev_attr_peak_fast_start_edge_cells.attr,
++	&dev_attr_palm_enabled.attr,
++	&dev_attr_palm_area_threshold.attr,
++	&dev_attr_palm_signal_threshold.attr,
++	&dev_attr_palm_density_low.attr,
++	&dev_attr_palm_box_enabled.attr,
++	&dev_attr_palm_box_expand_rows.attr,
++	&dev_attr_palm_box_expand_cols.attr,
++	&dev_attr_palm_box_match_distance.attr,
++	&dev_attr_palm_box_max_hold.attr,
++	&dev_attr_zone_cleanup_enabled.attr,
++	&dev_attr_zone_max_radius.attr,
++	&dev_attr_zone_threshold_numer.attr,
++	&dev_attr_zone_threshold_shift.attr,
++	&dev_attr_pressure_enabled.attr,
++	&dev_attr_edge_comp_enabled.attr,
++	&dev_attr_edge_boost_pct.attr,
++	&dev_attr_edge_push_q8.attr,
++	&dev_attr_edge_blend_q8.attr,
++	&dev_attr_edge_reject_enabled.attr,
++	&dev_attr_edge_reject_margin.attr,
++	&dev_attr_edge_reject_min_signal.attr,
++	&dev_attr_track_dist2_max.attr,
++	&dev_attr_track_lost_frames.attr,
++	&dev_attr_debounce_base.attr,
++	&dev_attr_track_smoothing.attr,
++	&dev_attr_track_active_guard.attr,
++	&dev_attr_track_start_debounce.attr,
++	&dev_attr_track_jump_dist2.attr,
++	&dev_attr_hungarian_enabled.attr,
++	&dev_attr_debounce_weak_extra.attr,
++	&dev_attr_debounce_edge_extra.attr,
++	&dev_attr_debounce_strong_signal.attr,
++	&dev_attr_firmware_edge_fast_start.attr,
++	&dev_attr_split_peak_confirm_frames.attr,
++	&dev_attr_split_peak_dist2.attr,
++	&dev_attr_split_cross_zone_confirm_frames.attr,
++	&dev_attr_split_cross_zone_dist2.attr,
++	&dev_attr_track_peak_id_penalty.attr,
++	&dev_attr_ghost_enabled.attr,
++	&dev_attr_ghost_row_distance.attr,
++	&dev_attr_ghost_weak_ratio_q8.attr,
++	&dev_attr_ghost_min_col_distance.attr,
++	&dev_attr_euro_enabled.attr,
++	&dev_attr_euro_alpha_min_q8.attr,
++	&dev_attr_euro_alpha_max_q8.attr,
++	&dev_attr_euro_speed_threshold.attr,
++	NULL,
++};
++
++static const struct attribute_group hx_algo_attr_group = {
++	.name = "algo",
++	.attrs = hx_algo_attrs,
++};
++
++int himax_sysfs_init(struct himax_ts_data *ts)
++{
++	int ret;
++
++	ret = device_create_file(ts->dev, &dev_attr_inplace_reset);
++	if (ret)
++		return ret;
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	ret = sysfs_create_bin_file(&ts->dev->kobj, &event_stack_attr);
++	if (ret)
++		goto remove_reset;
++	ret = sysfs_create_bin_file(&ts->dev->kobj, &event_trace_attr);
++	if (ret)
++		goto remove_event_stack;
++#endif
++
++	ret = devm_device_add_group(ts->dev, &hx_algo_attr_group);
++	if (!ret)
++		return 0;
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	sysfs_remove_bin_file(&ts->dev->kobj, &event_trace_attr);
++remove_event_stack:
++	sysfs_remove_bin_file(&ts->dev->kobj, &event_stack_attr);
++remove_reset:
++#endif
++	device_remove_file(ts->dev, &dev_attr_inplace_reset);
++	return ret;
++}
++
++void himax_sysfs_remove(struct himax_ts_data *ts)
++{
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	sysfs_remove_bin_file(&ts->dev->kobj, &event_trace_attr);
++	sysfs_remove_bin_file(&ts->dev->kobj, &event_stack_attr);
++#endif
++	device_remove_file(ts->dev, &dev_attr_inplace_reset);
++}
+diff --git a/drivers/input/touchscreen/himax-spi.h b/drivers/input/touchscreen/himax-spi.h
+new file mode 100644
+index 000000000..005de573b
+--- /dev/null
++++ b/drivers/input/touchscreen/himax-spi.h
+@@ -0,0 +1,192 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef HIMAX_SPI_H
++#define HIMAX_SPI_H
++
++#include <linux/gpio/consumer.h>
++#include <linux/input.h>
++#include <linux/input/touchscreen.h>
++#include <linux/mutex.h>
++#include <linux/spi/spi.h>
++#include <linux/workqueue.h>
++
++#include <drm/drm_panel.h>
++
++#include "hx-algo.h"
++#include "hx-frame-status.h"
++
++#define HIMAX_MAX_RX			60U
++#define HIMAX_MAX_TX			40U
++#define HIMAX_BUS_READ_HEADER_SIZE	3U
++#define HIMAX_EVENT_STACK_ADDRESS	0x30
++#define HIMAX_EVENT_HEADER_SIZE		128U
++#define HIMAX_FULL_EVENT_STACK_SIZE	(HIMAX_EVENT_HEADER_SIZE + \
++	(2 + HIMAX_MAX_RX * HIMAX_MAX_TX + HIMAX_MAX_TX + HIMAX_MAX_RX) * 2)
++#define HIMAX_HX83121A_FLASH_SIZE	(255 * 1024)
++#define HIMAX_SPI_CS_SETUP_TIME		300
++#define HIMAX_PANEL_REINIT_RETRIES	3
++#define HIMAX_PANEL_REINIT_DELAY_MS	50
++#define HIMAX_PANEL_ENABLE_SETTLE_MS	300
++#define HIMAX_MAX_CONSECUTIVE_FRAME_ERRORS 3
++#define HIMAX_RESUME_QUALITY_ATTEMPTS	30
++#define HIMAX_MAX_CONSECUTIVE_NOISE_FRAMES 12
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++#define HIMAX_TRACE_CAPACITY		512U
++#define HIMAX_TRACE_MAGIC		0x52545848U
++#define HIMAX_TRACE_VERSION		3U
++
++#define HIMAX_TRACE_F_READ_OK		BIT(0)
++#define HIMAX_TRACE_F_MASTER_VALID	BIT(1)
++#define HIMAX_TRACE_F_RETRY		BIT(2)
++#define HIMAX_TRACE_F_HAS_FINGER	BIT(3)
++#define HIMAX_TRACE_F_NOISE_HOLD	BIT(4)
++
++struct himax_trace_header {
++	__le32 magic;
++	__le16 version;
++	__le16 header_size;
++	__le32 record_size;
++	__le32 capacity;
++	__le32 count;
++	__le32 reserved;
++	__le64 snapshot_boottime_ns;
++	__le64 reset_generation;
++} __packed;
++
++struct himax_trace_peak {
++	u8 row;
++	u8 col;
++	__le16 signal;
++	__le16 zone_area;
++	u8 zone_index;
++	u8 flags;
++	u8 id;
++	u8 age;
++} __packed;
++
++struct himax_trace_track {
++	u8 flags;
++	u8 age;
++	u8 missed;
++	u8 debounce;
++	u8 source_peak_id;
++	u8 source_peak_age;
++	__le32 x;
++	__le32 y;
++	__le32 vx;
++	__le32 vy;
++	__le32 signal_sum;
++	__le32 filtered_x_q8;
++	__le32 filtered_y_q8;
++	__le32 deriv_x_q8;
++	__le32 deriv_y_q8;
++} __packed;
++
++struct himax_trace_record {
++	__le64 boottime_ns;
++	__le32 irq_sequence;
++	__le32 reset_generation;
++	__le32 flags;
++	__le32 read_error;
++	__le32 algo_frame_sequence;
++	__le32 common_diff;
++	__le16 frame_max;
++	u8 has_signal;
++	u8 zones;
++	u8 peaks;
++	u8 contacts_pre;
++	u8 contacts_post;
++	u8 active_tracks;
++	u8 reported_tracks;
++	u8 reserved;
++	struct himax_trace_peak peak[HX_MAX_PEAKS];
++	struct himax_trace_track track[HIMAX_MAX_TOUCH];
++	__le16 processed_frame[HX_PIXELS];
++	u8 event_stack[HIMAX_FULL_EVENT_STACK_SIZE];
++} __packed;
++#endif
++
++struct himax_ts_data {
++	u8 *xfer_buf;
++	u8 *event_buf;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	u8 *event_read_buf;
++#endif
++	u32 spi_xfer_max_sz;
++	u32 xfer_buf_sz;
++	u32 event_buf_sz;
++	spinlock_t irq_lock;
++	struct mutex op_lock;
++	bool irq_enabled;
++	bool panel_prepared;
++	bool panel_enabled;
++	bool controller_initialized;
++	bool retained_suspend;
++	bool shutting_down;
++	struct gpio_desc *gpiod_rst;
++	struct device *dev;
++	struct spi_device *spi;
++	struct input_dev *input_dev;
++	struct touchscreen_properties props;
++	struct drm_panel_follower panel_follower;
++	struct delayed_work panel_reinit_work;
++	struct hx_algo *algo;
++	u8 consecutive_frame_errors;
++	u8 consecutive_noise_frames;
++	u8 afe_command_slot;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	struct himax_trace_record *trace_ring;
++	u8 *trace_snapshot;
++	size_t trace_snapshot_len;
++	u32 trace_write_index;
++	u32 trace_count;
++	u32 trace_irq_sequence;
++	u32 reset_generation;
++	u32 cold_init_count;
++	u32 warm_resume_count;
++	u32 warm_resume_fallback_count;
++	u32 resume_stability_failures;
++	u32 afe_calibration_count;
++	u32 afe_calibration_failures;
++#endif
++};
++
++bool himax_full_resume_enabled(void);
++bool himax_restore_afe_enabled(void);
++void himax_int_enable(struct himax_ts_data *ts, bool enable);
++void himax_lock(struct himax_ts_data *ts);
++void himax_unlock(struct himax_ts_data *ts);
++int himax_spi_read(struct himax_ts_data *ts, u8 command, u8 *buf, u32 len);
++int himax_restore_afe_runtime(struct himax_ts_data *ts);
++int himax_restore_raw_runtime(struct himax_ts_data *ts);
++int himax_verify_running_ic(struct himax_ts_data *ts);
++int hx83121a_chip_detect(struct himax_ts_data *ts);
++int himax_enable_fw_reload(struct himax_ts_data *ts);
++int himax_mcu_power_on_init(struct himax_ts_data *ts);
++int himax_mcu_check_crc(struct himax_ts_data *ts, u32 start_addr,
++			int reload_length, u32 *crc_result);
++int himax_manual_reset(struct himax_ts_data *ts);
++int himax_sysfs_init(struct himax_ts_data *ts);
++void himax_sysfs_remove(struct himax_ts_data *ts);
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++void himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
++			    bool master_valid,
++			    const struct hx_frame_status *frame_status,
++			    bool noise_hold);
++#else
++static inline void
++himax_trace_record_irq(struct himax_ts_data *ts, int read_error,
++			bool master_valid,
++			const struct hx_frame_status *frame_status,
++			bool noise_hold)
++{
++	(void)ts;
++	(void)read_error;
++	(void)master_valid;
++	(void)frame_status;
++	(void)noise_hold;
++}
++#endif
++
++#endif /* HIMAX_SPI_H */
+diff --git a/drivers/input/touchscreen/hx-algo-detect.c b/drivers/input/touchscreen/hx-algo-detect.c
+new file mode 100644
+index 000000000..70d13a4f2
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo-detect.c
+@@ -0,0 +1,751 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Himax HX83121A zone, palm and peak detection. */
++
++#ifdef HX_ALGO_HOST_TEST
++#include "../tests/host-compat.h"
++#else
++#include <linux/kernel.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++#endif
++
++#include "hx-algo-internal.h"
++
++/* ======================================================================== */
++/* Phase 2A — macro-zone detection (8-connected BFS)                        */
++/* ======================================================================== */
++
++void hx_detect_macro_zones(struct hx_algo *algo)
++{
++	static const int dr[] = {-1, -1, -1, 0, 0, 1, 1, 1};
++	static const int dc[] = {-1,  0,  1, -1, 1, -1, 0, 1};
++	u16 head, tail;
++	int r, c, d;
++
++	memset(algo->visited, 0, sizeof(algo->visited));
++	algo->zone_count = 0;
++	algo->zone_arena_used = 0;
++
++	for (r = 0; r < HX_ROWS; r++) {
++		for (c = 0; c < HX_COLS; c++) {
++			int idx = r * HX_COLS + c;
++			struct hx_macro_zone candidate;
++			struct hx_macro_zone *zone = &candidate;
++
++			if (algo->visited[idx])
++				continue;
++			if (algo->frame[r][c] < algo->macro_threshold)
++				continue;
++			zone->arena_start = algo->zone_arena_used;
++			zone->area       = 0;
++			zone->signal_sum = 0;
++			zone->min_r = r;  zone->max_r = r;
++			zone->min_c = c;  zone->max_c = c;
++
++			/* Ring-buffer BFS using the pre-allocated queue. */
++			head = 0;
++			tail = 0;
++			algo->bfs_queue[tail++] = idx;
++			algo->visited[idx] = 1;
++
++			while (head != tail) {
++				int ci = algo->bfs_queue[head++];
++				int cr = ci / HX_COLS;
++				int cc = ci % HX_COLS;
++				s16 sig = algo->frame[cr][cc];
++
++				if (algo->zone_arena_used < HX_PIXELS)
++					algo->zone_arena[algo->zone_arena_used++] = ci;
++				zone->area++;
++				if (sig > 0)
++					zone->signal_sum += sig;
++
++				if (cr < zone->min_r)
++					zone->min_r = cr;
++				if (cr > zone->max_r)
++					zone->max_r = cr;
++				if (cc < zone->min_c)
++					zone->min_c = cc;
++				if (cc > zone->max_c)
++					zone->max_c = cc;
++
++				for (d = 0; d < 8; d++) {
++					int nr = cr + dr[d];
++					int nc = cc + dc[d];
++					int ni;
++
++					if (nr < 0 || nr >= HX_ROWS ||
++					    nc < 0 || nc >= HX_COLS)
++						continue;
++					ni = nr * HX_COLS + nc;
++					if (algo->visited[ni])
++						continue;
++					if (algo->frame[nr][nc] < algo->macro_threshold)
++						continue;
++					algo->visited[ni] = 1;
++					algo->bfs_queue[tail++] = ni;
++				}
++			}
++
++			if (algo->zone_count < HX_MAX_ZONES) {
++				algo->zones[algo->zone_count++] = candidate;
++			} else {
++				u8 weakest = 0;
++				u8 zi;
++
++				for (zi = 1; zi < HX_MAX_ZONES; zi++)
++					if (algo->zones[zi].signal_sum <
++					    algo->zones[weakest].signal_sum)
++						weakest = zi;
++				if (candidate.signal_sum >
++				    algo->zones[weakest].signal_sum)
++					algo->zones[weakest] = candidate;
++			}
++		}
++	}
++
++	/* Windows exposes macro zones strongest-first.  Besides matching its
++	 * behavior, deterministic ordering prevents later fixed-capacity stages
++	 * from depending on row-major scan position.
++	 */
++	for (r = 0; r + 1 < algo->zone_count; r++) {
++		int strongest = r;
++
++		for (c = r + 1; c < algo->zone_count; c++)
++			if (algo->zones[c].signal_sum >
++			    algo->zones[strongest].signal_sum)
++				strongest = c;
++		if (strongest != r)
++			swap(algo->zones[r], algo->zones[strongest]);
++	}
++}
++
++/* ======================================================================== */
++/* Phase 2B — palm rejection                                                 */
++/*                                                                           */
++/* Combine footprint, integrated signal, density and bounding-box evidence. */
++/* A compact, sharp peak is preserved even when its total signal is high.   */
++/* ======================================================================== */
++
++static bool hx_box_has_domain(const struct hx_algo *algo,
++			      const struct hx_palm_box *box)
++{
++	int r, c;
++
++	for (r = box->min_r; r <= box->max_r; r++)
++		for (c = box->min_c; c <= box->max_c; c++)
++			if (hx_frame_at(algo, r, c) >= algo->macro_threshold)
++				return true;
++	return false;
++}
++
++static void hx_age_palm_boxes(struct hx_algo *algo)
++{
++	u8 i, dst = 0;
++
++	for (i = 0; i < algo->palm_box_count; i++) {
++		struct hx_palm_box box = algo->palm_boxes[i];
++
++		if (hx_box_has_domain(algo, &box))
++			box.missed = 0;
++		else
++			box.missed++;
++		if (box.missed && (!algo->palm_box_max_hold ||
++				   box.missed > algo->palm_box_max_hold))
++			continue;
++		algo->palm_boxes[dst++] = box;
++	}
++	algo->palm_box_count = dst;
++}
++
++static void hx_update_palm_box(struct hx_algo *algo,
++			       const struct hx_macro_zone *z)
++{
++	struct hx_palm_box candidate;
++	int center_r, center_c;
++	u8 i;
++
++	if (!algo->palm_box_enabled)
++		return;
++	candidate.min_r = max_t(int, 0, z->min_r - algo->palm_box_expand_rows);
++	candidate.max_r = min_t(int, HX_ROWS - 1,
++				z->max_r + algo->palm_box_expand_rows);
++	candidate.min_c = max_t(int, 0, z->min_c - algo->palm_box_expand_cols);
++	candidate.max_c = min_t(int, HX_COLS - 1,
++				z->max_c + algo->palm_box_expand_cols);
++	candidate.missed = 0;
++	center_r = (candidate.min_r + candidate.max_r) / 2;
++	center_c = (candidate.min_c + candidate.max_c) / 2;
++
++	for (i = 0; i < algo->palm_box_count; i++) {
++		struct hx_palm_box *old = &algo->palm_boxes[i];
++		int old_r = (old->min_r + old->max_r) / 2;
++		int old_c = (old->min_c + old->max_c) / 2;
++
++		if (abs(center_r - old_r) <= algo->palm_box_match_distance &&
++		    abs(center_c - old_c) <= algo->palm_box_match_distance) {
++			*old = candidate;
++			return;
++		}
++	}
++	if (algo->palm_box_count < HX_MAX_PALM_BOXES)
++		algo->palm_boxes[algo->palm_box_count++] = candidate;
++}
++
++void hx_reject_palms(struct hx_algo *algo)
++{
++	u8 dst = 0;
++	u8 i;
++
++	hx_age_palm_boxes(algo);
++	if (!algo->palm_enabled)
++		return;
++
++	for (i = 0; i < algo->zone_count; i++) {
++		struct hx_macro_zone *z = &algo->zones[i];
++		u16 bbox_w, bbox_h, max_side, min_side;
++		u16 pi;
++		s32 max_signal = 0;
++		s32 mean_signal;
++		int palm_score = 0;
++		bool strong_finger_shape;
++		bool reject = false;
++
++		/* The Windows solver treats these as evidence, not four independent
++		 * kill switches.  The old Linux port dropped an entire normal finger
++		 * as soon as its integrated signal crossed 80000.
++		 */
++		if (z->area >= algo->palm_area_threshold)
++			palm_score += 35;
++		if (z->signal_sum >= algo->palm_signal_threshold)
++			palm_score += 25;
++		if (z->area >= 20 &&
++		    z->signal_sum < (s32)algo->palm_density_low * z->area)
++			palm_score += 15;
++
++		bbox_w   = z->max_c - z->min_c + 1;
++		bbox_h   = z->max_r - z->min_r + 1;
++		max_side = max(bbox_w, bbox_h);
++		min_side = min(bbox_w, bbox_h);
++		if (z->area >= 10 && min_side > 0 &&
++		    (u32)max_side * 256 >= 1024u * min_side)
++			palm_score += 15;
++		if (z->area >= 35 &&
++		    (u32)z->area * 100 >= (u32)bbox_w * bbox_h * 40)
++			palm_score += 15;
++
++		for (pi = 0; pi < z->area; pi++) {
++			int idx = algo->zone_arena[z->arena_start + pi];
++
++			max_signal = max_t(s32, max_signal,
++					   hx_frame_at(algo, idx / HX_COLS,
++						       idx % HX_COLS));
++		}
++		mean_signal = z->area ? z->signal_sum / z->area : 0;
++		strong_finger_shape = max_signal >= mean_signal + 100 &&
++				      max_signal * 100 >= mean_signal * 335;
++		if (strong_finger_shape)
++			palm_score -= 20;
++
++		/* Mirror PalmLikely: a large region needs several independent palm
++		 * signals before it may suppress contacts.
++		 */
++		reject = z->area >= 55 && palm_score >= 55;
++		if (reject)
++			hx_update_palm_box(algo, z);
++
++		if (!reject) {
++			if (dst != i)
++				algo->zones[dst] = *z;
++			dst++;
++		}
++	}
++
++	algo->zone_count = dst;
++}
++
++/* ======================================================================== */
++/* Phase 2C — peak detection within surviving zones                         */
++/* ======================================================================== */
++
++/*
++ * Asymmetric local-maximum test.
++ *
++ * "Before" neighbours (up + left in scan order) must be strictly less;
++ * "after" neighbours (down + right) may be equal.  This breaks ties on
++ * flat ridges so exactly one peak is produced per finger plateau.
++ */
++static bool hx_is_asymmetric_peak(const struct hx_algo *algo, int r, int c)
++{
++	s16 v = algo->frame[r][c];
++	int radius = max_t(int, 1, algo->peak_local_radius);
++	int dr, dc;
++
++	for (dr = -radius; dr <= radius; dr++) {
++		for (dc = -radius; dc <= radius; dc++) {
++			int nr, nc;
++			s16 nv;
++			bool after;
++
++			if (dr == 0 && dc == 0)
++				continue;
++			nr = r + dr;
++			nc = c + dc;
++			if (nr < 0 || nr >= HX_ROWS || nc < 0 || nc >= HX_COLS)
++				continue;
++			nv    = algo->frame[nr][nc];
++			after = (dr > 0) || (dr == 0 && dc > 0);
++			if (after) {
++				if (nv > v)
++					return false;
++			} else {
++				if (nv >= v)
++					return false;
++			}
++		}
++	}
++	return true;
++}
++
++/*
++ * Pressure-drift detector.
++ *
++ * A flat palm press produces a nearly-uniform row of elevated pixels with
++ * low cross-row gradient.  Returns true when the peak signal falls in the
++ * drift range [3/8, 3/4] of the independent signal limit, the row gradient
++ * is low, and the row signal sum is high relative to the peak.
++ */
++static bool hx_detect_pressure_drift(const struct hx_algo *algo, int r, int c)
++{
++	s16 peak_sig  = algo->frame[r][c];
++	s16 limit3_4  = (algo->peak_signal_threshold_limit * 3) >> 2;
++	s16 limit3_8  = (algo->peak_signal_threshold_limit * 3) >> 3;
++	int grad_sum  = 0;
++	int row_sum   = 0;
++	int col;
++
++	if (peak_sig > limit3_4 || peak_sig < limit3_8)
++		return false;
++
++	for (col = 1; col < HX_COLS - 1; col++) {
++		int grad = abs((int)hx_frame_at(algo, r, col + 1) -
++			       (int)hx_frame_at(algo, r, col - 1));
++
++		if (grad > algo->peak_signal_threshold_limit / 3)
++			return false;   /* sharp spike → not drift */
++		grad_sum += grad;
++		if (algo->frame[r][col] > 0)
++			row_sum += algo->frame[r][col];
++	}
++
++	return (row_sum >= peak_sig * 9 / 2) &&
++	       (peak_sig * 6 >= grad_sum);
++}
++
++/*
++ * Insert a peak into the fixed-size peak array.  When the array is full,
++ * replace the weakest existing entry if the new peak is stronger.
++ */
++static void hx_insert_peak(struct hx_algo *algo, const struct hx_peak *p)
++{
++	int k, weakest;
++
++	if (algo->peak_count < HX_MAX_PEAKS) {
++		algo->peaks[algo->peak_count++] = *p;
++		return;
++	}
++
++	weakest = 0;
++	for (k = 1; k < HX_MAX_PEAKS; k++) {
++		if (algo->peaks[k].z < algo->peaks[weakest].z)
++			weakest = k;
++	}
++	if (p->z > algo->peaks[weakest].z)
++		algo->peaks[weakest] = *p;
++}
++
++static u8 hx_allocate_peak_id(struct hx_algo *algo)
++{
++	int attempt;
++
++	for (attempt = 0; attempt < U8_MAX; attempt++) {
++		u8 id = algo->next_peak_id++;
++		bool used = false;
++		int i;
++
++		if (!algo->next_peak_id)
++			algo->next_peak_id = 1;
++		if (!id)
++			continue;
++		for (i = 0; i < algo->peak_count; i++)
++			if (algo->peaks[i].id == id) {
++				used = true;
++				break;
++			}
++		if (!used)
++			return id;
++	}
++	return 1;
++}
++
++/* Preserve peak identity before contacts are expanded.  A pure adjacent-cell
++ * match loses identity during a fast swipe (the captured failure moved more
++ * than three cells per frame).  Predict from the last grid velocity, while
++ * retaining a wider raw-distance fallback for acceleration and first motion.
++ * This is deliberately separate from the output-slot tracker: peak identity
++ * is supporting evidence, never an exclusive ownership lock.
++ */
++static void hx_track_peak_ids(struct hx_algo *algo)
++{
++	bool current_used[HX_MAX_PEAKS] = { false };
++	bool previous_used[HX_MAX_PEAKS] = { false };
++	int i;
++
++	for (i = 0; i < algo->peak_count; i++) {
++		algo->peaks[i].id = 0;
++		algo->peaks[i].age = 0;
++	}
++	for (;;) {
++		int best_score = INT_MAX;
++		int best_current = -1;
++		int best_previous = -1;
++		int j;
++
++		for (i = 0; i < algo->peak_count; i++) {
++			if (current_used[i])
++				continue;
++			for (j = 0; j < algo->prev_peak_count; j++) {
++				const struct hx_peak *cur = &algo->peaks[i];
++				const struct hx_peak *prev = &algo->prev_peaks[j];
++				int dr, dc, raw_distance, predicted_distance;
++				int score;
++
++				if (previous_used[j])
++					continue;
++				dr = (int)cur->r - (int)prev->r;
++				dc = (int)cur->c - (int)prev->c;
++				raw_distance = abs(dr) + abs(dc);
++				predicted_distance =
++					abs((int)cur->r - ((int)prev->r + prev->vr)) +
++					abs((int)cur->c - ((int)prev->c + prev->vc));
++				if (raw_distance > 10 && predicted_distance > 6)
++					continue;
++				/* Prediction dominates.  Raw displacement and signal
++				 * continuity only break ambiguous split-lobe matches.
++				 */
++				score = predicted_distance * 16 + raw_distance * 2;
++				score += min(abs((int)cur->z - (int)prev->z) / 64, 32);
++				if ((prev->vr || prev->vc) &&
++				    dr * prev->vr + dc * prev->vc <= 0 &&
++				    raw_distance > 1)
++					score += 48;
++				if (score < best_score) {
++					best_score = score;
++					best_current = i;
++					best_previous = j;
++				}
++			}
++		}
++		if (best_current < 0)
++			break;
++		algo->peaks[best_current].id =
++			algo->prev_peaks[best_previous].id;
++		algo->peaks[best_current].age =
++			algo->prev_peaks[best_previous].age < U8_MAX ?
++			algo->prev_peaks[best_previous].age + 1 : U8_MAX;
++		algo->peaks[best_current].vr = clamp_t(int,
++			(int)algo->peaks[best_current].r -
++			(int)algo->prev_peaks[best_previous].r, -128, 127);
++		algo->peaks[best_current].vc = clamp_t(int,
++			(int)algo->peaks[best_current].c -
++			(int)algo->prev_peaks[best_previous].c, -128, 127);
++		current_used[best_current] = true;
++		previous_used[best_previous] = true;
++	}
++	for (i = 0; i < algo->peak_count; i++)
++		if (!algo->peaks[i].id)
++			algo->peaks[i].id = hx_allocate_peak_id(algo);
++
++	memcpy(algo->prev_peaks, algo->peaks,
++	       algo->peak_count * sizeof(algo->peaks[0]));
++	algo->prev_peak_count = algo->peak_count;
++}
++
++void hx_detect_peaks(struct hx_algo *algo)
++{
++	u8 zi;
++
++	algo->peak_count = 0;
++
++	/* --- Asymmetric local-max scan within each surviving zone --- */
++	for (zi = 0; zi < algo->zone_count; zi++) {
++		struct hx_macro_zone *zone = &algo->zones[zi];
++		u16 pi;
++
++		for (pi = 0; pi < zone->area; pi++) {
++			int idx = algo->zone_arena[zone->arena_start + pi];
++			int r = idx / HX_COLS;
++			int c = idx % HX_COLS;
++			s16 v = algo->frame[r][c];
++			struct hx_peak peak;
++			bool on_edge = (r == 0 || r == HX_ROWS - 1 ||
++					c == 0 || c == HX_COLS - 1);
++			bool edge_threshold_cell = (c == 1 || c == HX_COLS - 2 ||
++						    r == HX_ROWS - 1);
++			int dr, dc;
++			s32 nbr_sum = 0;
++
++			if (v < (edge_threshold_cell ? algo->peak_edge_threshold :
++						algo->peak_threshold))
++				continue;
++			if (!hx_is_asymmetric_peak(algo, r, c))
++				continue;
++			if (hx_detect_pressure_drift(algo, r, c))
++				continue;
++
++			for (dr = -1; dr <= 1; dr++)
++				for (dc = -1; dc <= 1; dc++) {
++					if (dr == 0 && dc == 0)
++						continue;
++					nbr_sum += hx_frame_at(algo, r + dr, c + dc);
++				}
++
++			peak = (struct hx_peak){
++				.r         = r,
++				.c         = c,
++				.z         = v,
++				.nbr_sum   = nbr_sum,
++				.zone_area = zone->area,
++				.zone_index = zi,
++				.on_edge = on_edge,
++				.continuation_track_slot = -1,
++			};
++			hx_insert_peak(algo, &peak);
++		}
++	}
++
++	/* Close maxima without a real saddle are one broad peak, not two
++	 * fingers.  Integer midpoint sampling mirrors the Windows saddle gate.
++	 */
++	if (algo->peak_saddle_enabled) {
++		u8 i, j;
++
++		for (i = 0; i < algo->peak_count; i++) {
++			for (j = i + 1; j < algo->peak_count; j++) {
++				struct hx_peak *a = &algo->peaks[i];
++				struct hx_peak *b = &algo->peaks[j];
++				int dr = (int)b->r - a->r;
++				int dc = (int)b->c - a->c;
++				int steps = max(abs(dr), abs(dc));
++				int saddle = 0;
++				int weaker;
++				int required_drop;
++				int s;
++
++				if (a->zone_index != b->zone_index)
++					continue;
++				if (steps == 0 || steps > algo->peak_saddle_radius)
++					continue;
++				for (s = 1; s < steps; s++) {
++					int rr_num = dr * s;
++					int cc_num = dc * s;
++					int rr = a->r + (rr_num >= 0 ?
++						(rr_num + steps / 2) / steps :
++						(rr_num - steps / 2) / steps);
++					int cc = a->c + (cc_num >= 0 ?
++						(cc_num + steps / 2) / steps :
++						(cc_num - steps / 2) / steps);
++
++					saddle = max_t(int, saddle,
++						       hx_frame_at(algo, rr, cc));
++				}
++				weaker = min(a->z, b->z);
++				required_drop = max((int)algo->peak_saddle_drop,
++						    weaker * 8 / 100);
++				if (weaker - saddle < required_drop) {
++					struct hx_peak *weak = a->z <= b->z ? a : b;
++
++					weak->z = -1;
++				}
++			}
++		}
++		{
++			u8 dst = 0;
++
++			for (i = 0; i < algo->peak_count; i++)
++				if (algo->peaks[i].z >= 0)
++					algo->peaks[dst++] = algo->peaks[i];
++			algo->peak_count = dst;
++		}
++	}
++
++	/* --- Z8 isolation filter: (z >> 5) > nbr_sum → isolated spike --- */
++	{
++		u8 dst = 0, i;
++
++		for (i = 0; i < algo->peak_count; i++) {
++			if (!algo->peak_z8_enabled ||
++			    (algo->peaks[i].z >> 5) <= algo->peaks[i].nbr_sum)
++				algo->peaks[dst++] = algo->peaks[i];
++		}
++		algo->peak_count = dst;
++	}
++
++	/* Small peaks normally may only continue an existing reported track.  A
++	 * single strong compact peak close to a physical edge is the one exception:
++	 * on a trustworthy firmware finger-on transition it may bootstrap the first
++	 * slot.  This covers fast edge entries whose footprint has not grown to the
++	 * normal macro-area threshold yet.
++	 */
++	{
++		u8 dst = 0, i;
++		int reported_tracks = 0;
++		int ti;
++
++		for (ti = 0; ti < HIMAX_MAX_TOUCH; ti++)
++			if (algo->tracks[ti].active && algo->tracks[ti].reported)
++				reported_tracks++;
++
++		for (i = 0; i < algo->peak_count; i++) {
++			struct hx_peak *pk = &algo->peaks[i];
++			bool near_edge =
++				pk->r < algo->peak_fast_start_edge_cells ||
++				pk->r >= HX_ROWS - algo->peak_fast_start_edge_cells ||
++				pk->c < algo->peak_fast_start_edge_cells ||
++				pk->c >= HX_COLS - algo->peak_fast_start_edge_cells;
++			bool fast_start = algo->fast_edge_start_pending &&
++				algo->zone_count == 1 && algo->peak_count == 1 &&
++				pk->zone_area >= algo->peak_continue_min_area &&
++				pk->zone_area < algo->peak_macro_min_area && near_edge &&
++				pk->z >= algo->peak_fast_start_min_signal;
++			bool weak_single_track = reported_tracks == 1 &&
++				algo->zone_count == 1 && algo->firmware_finger_present &&
++				pk->z >= algo->peak_single_track_continue_min_signal;
++			bool continuation = false;
++			int matches = 0;
++			s8 continuation_slot = -1;
++
++			pk->fast_start_candidate = fast_start;
++			pk->continuation_only = false;
++			pk->continuation_track_slot = -1;
++			if (pk->zone_area < algo->peak_macro_min_area && !pk->on_edge &&
++			    pk->zone_area >= algo->peak_continue_min_area &&
++			    (pk->z >= algo->peak_continue_min_signal ||
++			     weak_single_track)) {
++				struct input_mt_pos approx = {
++					.x = (pk->c * 256 + 128) / 6,
++					.y = 5 * (pk->r * 256 + 128) / 32,
++				};
++
++				for (ti = 0; ti < HIMAX_MAX_TOUCH; ti++) {
++					struct hx_track *trk = &algo->tracks[ti];
++
++					if (!trk->active || !trk->reported)
++						continue;
++					if (hx_dist2_predicted(&approx, trk) <=
++					    max_t(s32, algo->peak_continue_dist2, 1)) {
++						matches++;
++						continuation_slot = ti;
++					}
++				}
++				continuation = matches == 1;
++			}
++			if (pk->zone_area >= algo->peak_macro_min_area || pk->on_edge ||
++			    fast_start || continuation) {
++				pk->continuation_only = continuation;
++				pk->continuation_track_slot = continuation ?
++					continuation_slot : -1;
++				algo->peaks[dst++] = *pk;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++				if (continuation)
++					algo->diag_small_peak_continued++;
++				if (continuation &&
++				    pk->z < algo->peak_continue_min_signal)
++					algo->diag_weak_peak_continued++;
++#endif
++			} else {
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++				algo->diag_small_peak_rejected++;
++#endif
++			}
++		}
++		algo->peak_count = dst;
++	}
++
++	/* Persistent PalmBox suppression catches strong finger-like peaks that
++	 * appear inside a palm domain on later frames.
++	 */
++	if (algo->palm_box_enabled && algo->palm_box_count) {
++		u8 i, bi, dst = 0;
++
++		for (i = 0; i < algo->peak_count; i++) {
++			bool inside = false;
++
++			for (bi = 0; bi < algo->palm_box_count; bi++) {
++				struct hx_palm_box *b = &algo->palm_boxes[bi];
++
++				if (algo->peaks[i].r >= b->min_r &&
++				    algo->peaks[i].r <= b->max_r &&
++				    algo->peaks[i].c >= b->min_c &&
++				    algo->peaks[i].c <= b->max_c) {
++					inside = true;
++					break;
++				}
++			}
++			if (!inside)
++				algo->peaks[dst++] = algo->peaks[i];
++		}
++		algo->peak_count = dst;
++	}
++
++	/* --- Edge peak filter: weak edge peaks < max_sig * 5/8 --- */
++	{
++		int edge;
++
++		for (edge = 0; edge < 2; edge++) {
++			s16 max_sig = 0, cutoff;
++			u8 dst = 0, i;
++
++			for (i = 0; i < algo->peak_count; i++) {
++				bool on_edge;
++
++				on_edge = algo->peaks[i].c ==
++					(edge == 0 ? 0 : HX_COLS - 1);
++				if (on_edge && algo->peaks[i].z > max_sig)
++					max_sig = algo->peaks[i].z;
++			}
++			if (max_sig == 0)
++				continue;
++
++			cutoff = (max_sig >> 3) * 5;
++			for (i = 0; i < algo->peak_count; i++) {
++				bool on_edge;
++
++				on_edge = algo->peaks[i].c ==
++					(edge == 0 ? 0 : HX_COLS - 1);
++				if (!(on_edge && algo->peaks[i].z < cutoff))
++					algo->peaks[dst++] = algo->peaks[i];
++			}
++			algo->peak_count = dst;
++		}
++	}
++
++	/* --- Sort ascending by signal (selection sort, ≤20 elements) --- */
++	{
++		u8 i, j;
++
++		for (i = 0; i + 1 < algo->peak_count; i++) {
++			u8 min_idx = i;
++
++			for (j = i + 1; j < algo->peak_count; j++) {
++				if (algo->peaks[j].z < algo->peaks[min_idx].z)
++					min_idx = j;
++			}
++			if (min_idx != i)
++				swap(algo->peaks[i], algo->peaks[min_idx]);
++		}
++	}
++
++	hx_track_peak_ids(algo);
++}
+diff --git a/drivers/input/touchscreen/hx-algo-internal.h b/drivers/input/touchscreen/hx-algo-internal.h
+new file mode 100644
+index 000000000..fcced4254
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo-internal.h
+@@ -0,0 +1,23 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef HX_ALGO_INTERNAL_H
++#define HX_ALGO_INTERNAL_H
++
++#include "hx-algo.h"
++
++#define HX_BASELINE_FRACTION_BITS 8
++
++void hx_copy_raw_to_baseline(s32 *baseline, const u16 *raw);
++s64 hx_dist2_predicted(const struct input_mt_pos *position,
++			const struct hx_track *track);
++
++static inline s16 hx_frame_at(const struct hx_algo *algo, int row, int col)
++{
++	s16 value;
++
++	if (row < 0 || row >= HX_ROWS || col < 0 || col >= HX_COLS)
++		return 0;
++	value = algo->frame[row][col];
++	return value > 0 ? value : 0;
++}
++
++#endif /* HX_ALGO_INTERNAL_H */
+diff --git a/drivers/input/touchscreen/hx-algo-preprocess.c b/drivers/input/touchscreen/hx-algo-preprocess.c
+new file mode 100644
+index 000000000..eae169a38
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo-preprocess.c
+@@ -0,0 +1,479 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Himax HX83121A baseline and frame preprocessing. */
++
++#ifdef HX_ALGO_HOST_TEST
++#include "../tests/host-compat.h"
++#else
++#include <linux/kernel.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++#endif
++
++#include "hx-algo-internal.h"
++
++static s32 hx_baseline_step_q8(s32 delta, u8 shift, s16 max_step)
++{
++	s32 limit_q8 = max_t(s32, max_step, 0) *
++			(1 << HX_BASELINE_FRACTION_BITS);
++	s32 step_q8;
++
++	if (!delta)
++		return 0;
++	step_q8 = delta * (1 << HX_BASELINE_FRACTION_BITS);
++	step_q8 >>= min_t(u8, shift, 30);
++	return clamp_t(s32, step_q8, -limit_q8, limit_q8);
++}
++
++static void hx_prepare_frame_baseline(struct hx_algo *algo, const u16 *raw,
++				      enum hx_finger_state finger_state)
++{
++	s64 common_sum = 0;
++	s32 common_diff;
++	s32 max_delta = INT_MIN;
++	int common_bin = 0;
++	int common_count = 0;
++	int cumulative = 0;
++	bool has_signal = false;
++	bool recovery;
++	bool found_freeze = false;
++	int r, c;
++
++	if (!algo->baseline_initialized) {
++		/* Match Windows BLIIR_Reset: use a real no-finger raw snapshot.  If
++		 * the first usable frame already carries a finger, retain the neutral
++		 * fallback so the contact cannot disappear into the baseline.
++		 */
++		if (finger_state != HX_FINGER_ABSENT) {
++			for (r = 0; r < HX_PIXELS; r++)
++				algo->baseline_q8[r] =
++					(s32)algo->baseline_initial <<
++					HX_BASELINE_FRACTION_BITS;
++		} else {
++			hx_copy_raw_to_baseline(algo->baseline_q8, raw);
++		}
++		memset(algo->baseline_release_hold, 0,
++		       sizeof(algo->baseline_release_hold));
++		algo->baseline_initialized = true;
++	}
++	memset(algo->baseline_hist, 0, sizeof(algo->baseline_hist));
++
++	/* Estimate panel-wide VCOM/temperature drift before classifying cells. */
++	for (r = 1; r < HX_PIXELS; r++) {
++		s32 sample = (s32)le16_to_cpup(raw + r);
++		s32 baseline = algo->baseline_q8[r] >>
++				HX_BASELINE_FRACTION_BITS;
++		s32 delta = sample - baseline;
++		int bin = (delta + 65536) >> 6;
++
++		algo->baseline_hist[clamp_t(int, bin, 0,
++			HX_BASELINE_HIST_BINS - 1)]++;
++	}
++	for (common_bin = 0; common_bin < HX_BASELINE_HIST_BINS;
++	     common_bin++) {
++		cumulative += algo->baseline_hist[common_bin];
++		if (cumulative >= HX_PIXELS / 2)
++			break;
++	}
++	common_bin = min(common_bin, HX_BASELINE_HIST_BINS - 1);
++	for (r = 1; r < HX_PIXELS; r++) {
++		s32 sample = (s32)le16_to_cpup(raw + r);
++		s32 baseline = algo->baseline_q8[r] >>
++				HX_BASELINE_FRACTION_BITS;
++		s32 delta = sample - baseline;
++		int bin = clamp_t(int, (delta + 65536) >> 6, 0,
++				      HX_BASELINE_HIST_BINS - 1);
++
++		max_delta = max(max_delta, delta);
++		if (bin == common_bin) {
++			common_sum += delta;
++			common_count++;
++		}
++	}
++	common_diff = common_count ? (s32)(common_sum / common_count) : 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_common_diff = common_diff;
++#endif
++	if (finger_state == HX_FINGER_PRESENT)
++		has_signal = true;
++	/* Even a validated firmware "no finger" bit may be wrong during display
++	 * interference.  Never let a contradictory raw peak be learned quickly.
++	 */
++	if (!has_signal) {
++		/* max_delta is collected while locating the common-mode bin.  This
++		 * avoids a third full-grid pass on every firmware no-finger frame.
++		 */
++		has_signal = max_delta - common_diff >=
++			algo->baseline_peak_threshold;
++		for (r = 0; r < HIMAX_MAX_TOUCH; r++)
++			if (algo->tracks[r].active) {
++				has_signal = true;
++				break;
++			}
++	}
++
++	recovery = has_signal && (!algo->baseline_prev_had_signal ||
++				    !algo->baseline_had_freeze) &&
++		   algo->baseline_recovery_frames <
++				algo->baseline_recovery_max_frames;
++	if (recovery)
++		algo->baseline_recovery_frames++;
++	else if (!has_signal || algo->baseline_had_freeze)
++		algo->baseline_recovery_frames = 0;
++	for (r = 0; r < HX_ROWS; r++) {
++		for (c = 0; c < HX_COLS; c++) {
++			int idx = r * HX_COLS + c;
++			s32 sample = (s32)le16_to_cpup(raw + idx);
++			s32 baseline = algo->baseline_q8[idx] >>
++					HX_BASELINE_FRACTION_BITS;
++			s32 delta = sample - baseline;
++			s32 local = delta - common_diff;
++			s32 step_q8 = 0;
++
++			if (!algo->baseline_enabled) {
++				delta = sample - algo->baseline_initial;
++				goto store;
++			}
++
++			/* Freeze cells carrying a finger-sized positive signal.  A hold
++			 * after release prevents the negative rebound from being absorbed
++			 * into the baseline and creating a later false lift.
++			 */
++			if (has_signal && local >= algo->baseline_peak_threshold) {
++				found_freeze = true;
++				algo->baseline_release_hold[idx] =
++					algo->baseline_release_hold_frames;
++				/* Frozen cells still follow global VCOM drift. */
++				step_q8 = hx_baseline_step_q8(common_diff,
++					algo->baseline_background_alpha_shift,
++					algo->baseline_background_max_step);
++				algo->baseline_q8[idx] = clamp_t(s32,
++					algo->baseline_q8[idx] + step_q8, 0,
++					0xffff << HX_BASELINE_FRACTION_BITS);
++				delta = local;
++				goto store;
++			}
++			if (algo->baseline_release_hold[idx]) {
++				algo->baseline_release_hold[idx]--;
++				if (local < -algo->baseline_negative_deadband) {
++					delta = local;
++					goto store;
++				}
++				delta = 0;
++				goto store;
++			}
++
++			if (!has_signal) {
++				if (abs(delta) <= algo->baseline_noise_deadband &&
++				    algo->baseline_noise_tracking)
++					step_q8 = hx_baseline_step_q8(delta,
++						algo->baseline_noise_alpha_shift, 1);
++				else
++					step_q8 = hx_baseline_step_q8(delta,
++						algo->baseline_no_finger_alpha_shift,
++						algo->baseline_no_finger_max_step);
++			} else if (recovery) {
++				step_q8 = hx_baseline_step_q8(delta,
++					algo->baseline_recovery_alpha_shift,
++					algo->baseline_recovery_max_step);
++			} else if (abs(delta) <= algo->baseline_noise_deadband &&
++				   algo->baseline_noise_tracking)
++				step_q8 = hx_baseline_step_q8(delta,
++					algo->baseline_noise_alpha_shift, 1);
++			else if (delta > algo->baseline_positive_deadband)
++				step_q8 = hx_baseline_step_q8(delta,
++					algo->baseline_positive_alpha_shift,
++					algo->baseline_positive_max_step);
++			else if (delta < -algo->baseline_negative_deadband)
++				step_q8 = hx_baseline_step_q8(delta,
++					algo->baseline_negative_alpha_shift,
++					algo->baseline_negative_max_step);
++
++			algo->baseline_q8[idx] = clamp_t(s32,
++				algo->baseline_q8[idx] + step_q8, 0,
++				0xffff << HX_BASELINE_FRACTION_BITS);
++
++			/* Match v1.1.2 ProcessNoFinger/ProcessFinger background
++			 * semantics: only frozen candidate cells reach the solver.
++			 * Passing every local residual fills the fixed zone arena with
++			 * background islands and can evict a real finger by scan order.
++			 */
++			delta = 0;
++store:
++			algo->frame[r][c] = clamp_t(s32, delta, SHRT_MIN, SHRT_MAX);
++		}
++	}
++	algo->baseline_prev_had_signal = has_signal;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_has_signal = has_signal;
++#endif
++	algo->baseline_had_freeze = found_freeze;
++	if (finger_state == HX_FINGER_ABSENT && !has_signal && !found_freeze) {
++		u8 row_unstable[HX_ROWS] = { 0 };
++		u8 col_unstable[HX_COLS] = { 0 };
++		u16 unstable = 0;
++
++		if (!algo->safe_no_finger_frames) {
++			hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
++			algo->safe_no_finger_frames = 1;
++		} else {
++			for (r = 1; r < HX_PIXELS; r++) {
++				s32 candidate = algo->wake_candidate_q8[r] >>
++						HX_BASELINE_FRACTION_BITS;
++				s32 sample = (s32)le16_to_cpup(raw + r);
++
++				if (abs(sample - candidate) >
++				    algo->wake_raw_jump_threshold) {
++					row_unstable[r / HX_COLS]++;
++					col_unstable[r % HX_COLS]++;
++					unstable++;
++				}
++			}
++			for (r = 0; r < HX_ROWS; r++)
++				if (row_unstable[r] >=
++				    algo->wake_max_unstable_line_nodes)
++					unstable = algo->wake_max_unstable_nodes + 1;
++			for (r = 0; r < HX_COLS; r++)
++				if (col_unstable[r] >=
++				    algo->wake_max_unstable_line_nodes)
++					unstable = algo->wake_max_unstable_nodes + 1;
++			if (unstable > algo->wake_max_unstable_nodes) {
++				hx_copy_raw_to_baseline(algo->wake_candidate_q8,
++							raw);
++				algo->safe_no_finger_frames = 1;
++			} else if (algo->safe_no_finger_frames < U8_MAX) {
++				algo->safe_no_finger_frames++;
++			}
++		}
++		if (algo->safe_no_finger_frames >=
++		    algo->safe_commit_no_finger_frames) {
++			memcpy(algo->safe_baseline_q8, algo->wake_candidate_q8,
++			       sizeof(algo->safe_baseline_q8));
++			algo->safe_baseline_valid = true;
++			algo->safe_no_finger_frames = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			algo->baseline_safe_commit_count++;
++#endif
++		}
++	} else {
++		algo->safe_no_finger_frames = 0;
++	}
++
++	/* pixel [0][0] is always invalid on this panel layout */
++	algo->frame[0][0] = 0;
++}
++
++/* ======================================================================== */
++/* Phase 1A½ — edge signal boost                                            */
++/*                                                                           */
++/* Compensate reduced capacitive sensitivity at sensor borders by scaling   */
++/* border pixels upward.  Row 0/last and col 0/last get the full boost;    */
++/* row 1/last-1 and col 1/last-1 get half.  Corner pixels (on two borders) */
++/* are boosted once from each axis (multiplicative).                         */
++/* ======================================================================== */
++
++static void hx_edge_boost(struct hx_algo *algo)
++{
++	int r, c;
++	s32 pct = algo->edge_boost_pct;
++	s32 half_pct = pct / 2;
++
++	if (!algo->edge_comp_enabled || pct <= 0)
++		return;
++
++	/* Boost border rows: row 0 and row HX_ROWS-1 (full), row 1 and HX_ROWS-2 (half) */
++	for (c = 0; c < HX_COLS; c++) {
++		s32 v;
++
++		/* Top edge */
++		v = algo->frame[0][c];
++		if (v > 0)
++			algo->frame[0][c] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
++		v = algo->frame[1][c];
++		if (v > 0)
++			algo->frame[1][c] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
++
++		/* Bottom edge */
++		v = algo->frame[HX_ROWS - 1][c];
++		if (v > 0)
++			algo->frame[HX_ROWS - 1][c] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
++		v = algo->frame[HX_ROWS - 2][c];
++		if (v > 0)
++			algo->frame[HX_ROWS - 2][c] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
++	}
++
++	/* Boost border columns: col 0 and col HX_COLS-1 (full), col 1 and HX_COLS-2 (half) */
++	for (r = 0; r < HX_ROWS; r++) {
++		s32 v;
++
++		/* Left edge */
++		v = algo->frame[r][0];
++		if (v > 0)
++			algo->frame[r][0] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
++		v = algo->frame[r][1];
++		if (v > 0)
++			algo->frame[r][1] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
++
++		/* Right edge */
++		v = algo->frame[r][HX_COLS - 1];
++		if (v > 0)
++			algo->frame[r][HX_COLS - 1] = clamp_t(s32, v + v * pct / 100, 0, SHRT_MAX);
++		v = algo->frame[r][HX_COLS - 2];
++		if (v > 0)
++			algo->frame[r][HX_COLS - 2] = clamp_t(s32, v + v * half_pct / 100, 0, SHRT_MAX);
++	}
++}
++
++/* ======================================================================== */
++/* Phase 1B — CMF (Common Mode Filter)                                      */
++/*                                                                           */
++/* Removes charger-induced common-mode noise by subtracting per-row and     */
++/* per-column offsets computed from "quiet" pixels (|val| < exclusion).     */
++/* DualDim mode: rows first, then columns.                                   */
++/* ======================================================================== */
++
++static void hx_apply_cmf(struct hx_algo *algo)
++{
++	int r, c;
++
++	/* Row pass */
++	for (r = 0; r < HX_ROWS; r++) {
++		s32 sum = 0, count = 0, offset;
++
++		for (c = 0; c < HX_COLS; c++) {
++			s16 v = algo->frame[r][c];
++
++			if (abs((int)v) < algo->cmf_exclusion) {
++				sum += v;
++				count++;
++			}
++		}
++		if (!count)
++			continue;
++
++		offset = clamp_t(s32, sum / count,
++				 -algo->cmf_max_correction,
++				  algo->cmf_max_correction);
++		for (c = 0; c < HX_COLS; c++) {
++			s32 corrected = (s32)algo->frame[r][c] - offset;
++
++			algo->frame[r][c] = clamp_t(s32, corrected, SHRT_MIN, SHRT_MAX);
++		}
++	}
++
++	/* Column pass */
++	for (c = 0; c < HX_COLS; c++) {
++		s32 sum = 0, count = 0, offset;
++
++		for (r = 0; r < HX_ROWS; r++) {
++			s16 v = algo->frame[r][c];
++
++			if (abs((int)v) < algo->cmf_exclusion) {
++				sum += v;
++				count++;
++			}
++		}
++		if (!count)
++			continue;
++
++		offset = clamp_t(s32, sum / count,
++				 -algo->cmf_max_correction,
++				  algo->cmf_max_correction);
++		for (r = 0; r < HX_ROWS; r++) {
++			s32 corrected = (s32)algo->frame[r][c] - offset;
++
++			algo->frame[r][c] = clamp_t(s32, corrected, SHRT_MIN, SHRT_MAX);
++		}
++	}
++}
++
++/* ======================================================================== */
++/* Phase 1C — GridIIR temporal filter                                       */
++/*                                                                           */
++/* Per-pixel exponential decay for noise suppression.  Pixels above a       */
++/* dynamic threshold (proportional to the frame maximum) bypass the filter  */
++/* so real touch signals are never attenuated.                               */
++/* ======================================================================== */
++
++static void hx_apply_iir(struct hx_algo *algo)
++{
++	int r, c;
++	s32 frame_max = 0;
++	s32 dyn_threshold;
++	u16 decay_weight, decay_step;
++
++	if (!algo->iir_enabled) {
++		/* Do not maintain an unused 2400-cell history at frame rate.  Marking
++		 * it invalid makes a later runtime enable seed from its first frame.
++		 */
++		algo->iir_initialized = false;
++		return;
++	}
++
++	if (!algo->iir_initialized) {
++		memcpy(algo->iir_history, algo->frame, sizeof(algo->frame));
++		algo->iir_initialized = true;
++		return;
++	}
++
++	for (r = 0; r < HX_ROWS; r++)
++		for (c = 0; c < HX_COLS; c++)
++			frame_max = max(frame_max, abs((int)algo->frame[r][c]));
++
++	dyn_threshold = max((frame_max * algo->iir_gate_ratio_q8) >> 8,
++			    (s32)algo->iir_gate_floor);
++	decay_weight  = min_t(u16, algo->iir_decay_weight, 256);
++	decay_step    = algo->iir_decay_step;
++
++	for (r = 0; r < HX_ROWS; r++) {
++		for (c = 0; c < HX_COLS; c++) {
++			s32 cur = algo->frame[r][c];
++			s32 output;
++
++			if (cur >= dyn_threshold) {
++				output = cur;
++			} else {
++				s32 hist  = algo->iir_history[r][c];
++				s32 mixed = decay_weight * cur +
++					    (256 - decay_weight) * hist;
++
++				output = mixed >> 8;
++				output = max(0, output - (s32)decay_step);
++				if (output < algo->iir_noise_floor)
++					output = 0;
++			}
++
++			algo->frame[r][c]       = clamp_t(s32, output, SHRT_MIN, SHRT_MAX);
++			algo->iir_history[r][c] = algo->frame[r][c];
++		}
++	}
++}
++
++/* ======================================================================== */
++/* Phase 1 entry point                                                       */
++/* ======================================================================== */
++
++#ifdef HX_ALGO_HOST_TEST
++void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw)
++{
++	hx_preprocess_frame_state(algo, raw, HX_FINGER_UNKNOWN);
++}
++#endif
++
++void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
++			       enum hx_finger_state finger_state)
++{
++	hx_prepare_frame_baseline(algo, raw, finger_state);
++
++	if (algo->cmf_enabled)
++		hx_apply_cmf(algo);
++
++	hx_edge_boost(algo);
++
++	hx_apply_iir(algo);
++}
++
++/*
++ * Clamp-to-zero accessor: returns 0 for out-of-bounds or negative values so
++ * neighbour lookups near the grid edge never need special-casing.
++ */
+diff --git a/drivers/input/touchscreen/hx-algo-resolve.c b/drivers/input/touchscreen/hx-algo-resolve.c
+new file mode 100644
+index 000000000..32d8e4bd9
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo-resolve.c
+@@ -0,0 +1,310 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Himax HX83121A contact-region expansion and coordinate solving. */
++
++#ifdef HX_ALGO_HOST_TEST
++#include "../tests/host-compat.h"
++#else
++#include <linux/kernel.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++#endif
++
++#include "hx-algo-internal.h"
++
++/* ======================================================================== */
++/* Phase 2D — zone expansion + weighted centroid                            */
++/*                                                                           */
++/* For each peak, BFS-expand outward while signal >= 50% of the peak       */
++/* value.  Accumulate weighted centroid (Q8.8 fixed-point grid coords)     */
++/* using s64 intermediate products.  When the BFS meets pixels already     */
++/* owned by another peak, fall back to a 3x3 local centroid.               */
++/*                                                                           */
++/* Result: contacts[] filled, then converted to output coords [0, 65535].  */
++/* ======================================================================== */
++
++/*
++ * Compute the zone expansion threshold: ~50% of min(peak_threshold, peak_z).
++ * Uses integer multiply + shift: base * 0x40 >> 7 ≈ base * 0.5.
++ */
++static inline s16 hx_zone_thold(const struct hx_algo *algo, s16 peak_z)
++{
++	int base = min_t(int, algo->peak_threshold, peak_z);
++	int shift = min_t(int, algo->zone_threshold_shift, 15);
++	int result = (base * algo->zone_threshold_numer) >> shift;
++
++	return (s16)max(result, 1);
++}
++
++static int hx_neighbor_support(const struct hx_algo *algo, int r, int c,
++			       s16 threshold)
++{
++	int dr, dc;
++	int support = 0;
++
++	for (dr = -1; dr <= 1; dr++)
++		for (dc = -1; dc <= 1; dc++)
++			if ((dr || dc) &&
++			    hx_frame_at(algo, r + dr, c + dc) >= threshold)
++				support++;
++	return support;
++}
++
++/*
++ * Single-peak zone: BFS flood-fill weighted centroid.
++ * Returns true if the expansion was clean (no overlap with other zones).
++ */
++static bool hx_expand_single_peak(struct hx_algo *algo, int pi,
++				    struct hx_contact *ct)
++{
++	struct hx_peak *pk = &algo->peaks[pi];
++	s16 thold = hx_zone_thold(algo, pk->z);
++	u8 zone_id = (u8)(pi + 1);
++	u16 head = 0, tail = 0;
++	int seed = pk->r * HX_COLS + pk->c;
++	bool clean = true;
++	s64 w_col = 0, w_row = 0;
++	s32 w_total = 0;
++	u16 area = 0;
++	s32 sig_sum = 0;
++
++	static const int dr[] = {-1, -1, -1, 0, 0, 1, 1, 1};
++	static const int dc[] = {-1,  0,  1, -1, 1, -1, 0, 1};
++
++	algo->zone_map[seed] = zone_id;
++	algo->bfs_queue[tail++] = seed;
++
++	while (head != tail) {
++		int idx = algo->bfs_queue[head++];
++		int r = idx / HX_COLS;
++		int c = idx % HX_COLS;
++		s16 sig = hx_frame_at(algo, r, c);
++		int d;
++
++		area++;
++		sig_sum += sig;
++		w_col += (s64)c * 128 * sig;
++		w_row += (s64)r * 128 * sig;
++		w_total += sig;
++
++		for (d = 0; d < 8; d++) {
++			int nr = r + dr[d];
++			int nc = c + dc[d];
++			int ni;
++
++			if (nr < 0 || nr >= HX_ROWS || nc < 0 || nc >= HX_COLS)
++				continue;
++			ni = nr * HX_COLS + nc;
++			if (algo->zone_map[ni]) {
++				if (algo->zone_map[ni] != zone_id)
++					clean = false;
++				continue;
++			}
++			if (hx_frame_at(algo, nr, nc) < thold)
++				continue;
++			if (algo->zone_max_radius &&
++			    max(abs(nr - (int)pk->r), abs(nc - (int)pk->c)) >
++				algo->zone_max_radius)
++				continue;
++			if (algo->zone_cleanup_enabled &&
++			    hx_neighbor_support(algo, nr, nc, thold) < 2)
++				continue;
++			algo->zone_map[ni] = zone_id;
++			algo->bfs_queue[tail++] = ni;
++		}
++	}
++
++	if (w_total > 0) {
++		ct->x = (s32)(w_col * 2 / w_total) + 0x80;
++		ct->y = (s32)(w_row * 2 / w_total) + 0x80;
++	} else {
++		ct->x = pk->c * 256 + 128;
++		ct->y = pk->r * 256 + 128;
++	}
++	ct->area = area;
++	ct->signal_sum = sig_sum;
++	ct->is_edge = (pk->r == 0 || pk->r == HX_ROWS - 1 ||
++		       pk->c == 0 || pk->c == HX_COLS - 1);
++	ct->fast_start_candidate = pk->fast_start_candidate;
++	ct->peak_index = pi;
++	ct->source_peak_id = pk->id;
++	ct->source_peak_age = pk->age;
++	ct->source_zone_index = pk->zone_index;
++	ct->continuation_only = pk->continuation_only;
++	ct->continuation_track_slot = pk->continuation_track_slot;
++
++	return clean;
++}
++
++/*
++ * Multi-peak fallback: 3x3 local weighted centroid around the peak.
++ */
++static void hx_local_centroid(struct hx_algo *algo, int pi,
++			       struct hx_contact *ct)
++{
++	struct hx_peak *pk = &algo->peaks[pi];
++	s64 w_col = 0, w_row = 0;
++	s32 w_total = 0;
++	u16 area = 0;
++	s32 sig_sum = 0;
++	int dr, dc;
++
++	for (dr = -1; dr <= 1; dr++) {
++		for (dc = -1; dc <= 1; dc++) {
++			int nr = pk->r + dr;
++			int nc = pk->c + dc;
++			s16 sig;
++
++			if (nr < 0 || nr >= HX_ROWS || nc < 0 || nc >= HX_COLS)
++				continue;
++			sig = hx_frame_at(algo, nr, nc);
++			if (sig <= 0)
++				continue;
++			w_col += (s64)nc * 128 * sig;
++			w_row += (s64)nr * 128 * sig;
++			w_total += sig;
++			area++;
++			sig_sum += sig;
++		}
++	}
++
++	if (w_total > 0) {
++		ct->x = (s32)(w_col * 2 / w_total) + 0x80;
++		ct->y = (s32)(w_row * 2 / w_total) + 0x80;
++	} else {
++		ct->x = pk->c * 256 + 128;
++		ct->y = pk->r * 256 + 128;
++	}
++	ct->area = area;
++	ct->signal_sum = sig_sum;
++	ct->is_edge = (pk->r == 0 || pk->r == HX_ROWS - 1 ||
++		       pk->c == 0 || pk->c == HX_COLS - 1);
++	ct->fast_start_candidate = pk->fast_start_candidate;
++	ct->peak_index = pi;
++	ct->source_peak_id = pk->id;
++	ct->source_peak_age = pk->age;
++	ct->source_zone_index = pk->zone_index;
++	ct->continuation_only = pk->continuation_only;
++	ct->continuation_track_slot = pk->continuation_track_slot;
++}
++
++/*
++ * Edge compensation: push centroid outward toward the physical sensor
++ * boundary.  The sensor extends ~0.5 cells beyond the last grid node,
++ * but the weighted centroid is biased inward because there's no data
++ * outside the grid.  This function linearly pushes edge contacts
++ * outward, with maximum push at the boundary itself, fading to zero
++ * at edge_blend_q8 distance from the edge.
++ */
++static void hx_edge_compensate(struct hx_algo *algo, struct hx_contact *ct)
++{
++	s32 push_max = algo->edge_push_q8;
++	s32 blend    = algo->edge_blend_q8;
++	s32 dist, push;
++
++	if (!algo->edge_comp_enabled || push_max <= 0 || blend <= 0)
++		return;
++
++	/* Left boundary: distance = ct->x (Q8.8, 0 = grid col 0 center) */
++	dist = ct->x;
++	if (dist < blend) {
++		push = push_max * (blend - dist) / blend;
++		ct->x = max_t(s32, ct->x - push, 0);
++	}
++
++	/* Right boundary: distance from last col center */
++	dist = (HX_COLS - 1) * 256 + 128 - ct->x;
++	if (dist < blend) {
++		push = push_max * (blend - dist) / blend;
++		ct->x = min_t(s32, ct->x + push, (HX_COLS - 1) * 256 + 256);
++	}
++
++	/* Top boundary */
++	dist = ct->y;
++	if (dist < blend) {
++		push = push_max * (blend - dist) / blend;
++		ct->y = max_t(s32, ct->y - push, 0);
++	}
++
++	/* Bottom boundary */
++	dist = (HX_ROWS - 1) * 256 + 128 - ct->y;
++	if (dist < blend) {
++		push = push_max * (blend - dist) / blend;
++		ct->y = min_t(s32, ct->y + push, (HX_ROWS - 1) * 256 + 256);
++	}
++}
++
++void hx_expand_and_resolve(struct hx_algo *algo,
++			    struct input_mt_pos *pos, int *cnt)
++{
++	int i, n;
++
++	memset(algo->zone_map, 0, sizeof(algo->zone_map));
++	algo->contact_count = 0;
++
++	n = min_t(int, algo->peak_count, HX_MAX_PEAKS);
++
++	for (i = 0; i < n; i++) {
++		struct hx_contact *ct = &algo->contacts[algo->contact_count];
++		bool clean;
++
++		clean = hx_expand_single_peak(algo, i, ct);
++		if (!clean)
++			hx_local_centroid(algo, i, ct);
++
++		/* Push edge centroids outward toward physical sensor boundary */
++		if (ct->is_edge)
++			hx_edge_compensate(algo, ct);
++
++		algo->contact_count++;
++	}
++
++	/* If more peaks than slots, keep the strongest signal_sum contacts.
++	 * Do this after resolving every stored peak: peaks are intentionally
++	 * processed weakest-first for deterministic zone ownership.
++	 */
++	if (algo->contact_count > HIMAX_MAX_TOUCH) {
++		/* Selection-sort descending by signal_sum, keep first MAX */
++		u8 ci, cj;
++
++		for (ci = 0; ci + 1 < algo->contact_count; ci++) {
++			u8 best = ci;
++
++			for (cj = ci + 1; cj < algo->contact_count; cj++) {
++				if (algo->contacts[cj].signal_sum >
++				    algo->contacts[best].signal_sum)
++					best = cj;
++			}
++			if (best != ci)
++				swap(algo->contacts[ci], algo->contacts[best]);
++		}
++		algo->contact_count = HIMAX_MAX_TOUCH;
++	}
++
++	/* Convert Q8.8 grid coordinates to output space matching rxtx2xy:
++	 *   x = ct->x / 6       (maps to [~21, ~2539])
++	 *   y = 5 * ct->y / 32  (maps to [~20, ~1580])
++	 * This matches the coordinate range the DT/touchscreen_properties
++	 * are calibrated for.
++	 */
++	*cnt = 0;
++	for (i = 0; i < algo->contact_count; i++) {
++		struct hx_contact *ct = &algo->contacts[i];
++		s32 x = clamp_val((s32)(ct->x / 6), 0, SZ_64K - 1);
++		s32 y = clamp_val((s32)(5 * ct->y / 32), 0, SZ_64K - 1);
++		bool near_edge = x < algo->edge_reject_margin ||
++			x > (HX_COLS * 256 / 6) - algo->edge_reject_margin ||
++			y < algo->edge_reject_margin ||
++			y > (HX_ROWS * 40) - algo->edge_reject_margin;
++
++		if (algo->edge_reject_enabled && near_edge &&
++		    ct->signal_sum < algo->edge_reject_min_signal)
++			continue;
++		if (*cnt != i)
++			algo->contacts[*cnt] = *ct;
++		pos[*cnt].x = x;
++		pos[*cnt].y = y;
++		(*cnt)++;
++	}
++	algo->contact_count = *cnt;
++}
+diff --git a/drivers/input/touchscreen/hx-algo-track.c b/drivers/input/touchscreen/hx-algo-track.c
+new file mode 100644
+index 000000000..f880094f6
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo-track.c
+@@ -0,0 +1,699 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Himax HX83121A contact assignment and slot tracking. */
++
++#ifdef HX_ALGO_HOST_TEST
++#include "../tests/host-compat.h"
++#else
++#include <linux/kernel.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++#endif
++
++#include "hx-algo-internal.h"
++
++s64 hx_dist2_predicted(const struct input_mt_pos *a,
++			const struct hx_track *b)
++{
++	s32 frames_ahead = max_t(s32, 1, (s32)b->missed + 1);
++	s32 pred_x = b->x + b->vx * frames_ahead;
++	s32 pred_y = b->y + b->vy * frames_ahead;
++	s32 dx = a->x - pred_x;
++	s32 dy = a->y - pred_y;
++
++	return (s64)dx * dx + (s64)dy * dy;
++}
++
++/* A fast swipe can cover several times the immediately preceding step when a
++ * weak corner frame briefly pins the centroid.  For a competing peak-ID
++ * handoff, measure distance to a short forward motion ray rather than only to
++ * the one-step prediction.  This is never used to enlarge the match gate.
++ */
++static s64 hx_dist2_motion_ray(const struct input_mt_pos *a,
++				const struct hx_track *b)
++{
++	s64 best = hx_dist2_predicted(a, b);
++	int step;
++
++	if (!b->vx && !b->vy)
++		return best;
++	for (step = 2; step <= 4; step++) {
++		s32 dx = a->x - (b->x + b->vx * step);
++		s32 dy = a->y - (b->y + b->vy * step);
++		s64 d2 = (s64)dx * dx + (s64)dy * dy;
++
++		if (d2 < best)
++			best = d2;
++	}
++	return best;
++}
++
++static void hx_reset_track(struct hx_track *trk)
++{
++	memset(trk, 0, sizeof(*trk));
++}
++
++static void hx_filter_track(struct hx_algo *algo, struct hx_track *trk,
++			    const struct input_mt_pos *det)
++{
++	s32 dx = det->x - trk->x;
++	s32 dy = det->y - trk->y;
++	s32 speed = max(abs(dx), abs(dy));
++	s32 alpha;
++
++	trk->vx = dx;
++	trk->vy = dy;
++	if (!algo->track_smoothing || !algo->euro_enabled) {
++		trk->x = det->x;
++		trk->y = det->y;
++		trk->filtered_x_q8 = det->x << 8;
++		trk->filtered_y_q8 = det->y << 8;
++		return;
++	}
++
++	alpha = min(algo->euro_alpha_min_q8, algo->euro_alpha_max_q8);
++	if (algo->euro_speed_threshold)
++		alpha += (s32)(max(algo->euro_alpha_min_q8,
++				 algo->euro_alpha_max_q8) - alpha) *
++			 min_t(s32, speed, algo->euro_speed_threshold) /
++			 algo->euro_speed_threshold;
++	alpha = clamp_t(s32, alpha, 1, 255);
++	trk->deriv_x_q8 += (alpha * ((dx << 8) - trk->deriv_x_q8)) >> 8;
++	trk->deriv_y_q8 += (alpha * ((dy << 8) - trk->deriv_y_q8)) >> 8;
++	trk->filtered_x_q8 +=
++		(alpha * ((det->x << 8) - trk->filtered_x_q8)) >> 8;
++	trk->filtered_y_q8 +=
++		(alpha * ((det->y << 8) - trk->filtered_y_q8)) >> 8;
++	trk->x = trk->filtered_x_q8 >> 8;
++	trk->y = trk->filtered_y_q8 >> 8;
++}
++
++static void hx_hungarian_assign(struct hx_algo *algo, const u8 *active,
++				int active_cnt, int det_cnt, s8 *match)
++{
++	const s64 inf = (s64)1 << 55;
++	int cols = det_cnt + active_cnt;
++	int i, j;
++
++	memset(algo->assign_u, 0, (active_cnt + 1) * sizeof(algo->assign_u[0]));
++	memset(algo->assign_v, 0, (cols + 1) * sizeof(algo->assign_v[0]));
++	memset(algo->assign_p, 0, (cols + 1) * sizeof(algo->assign_p[0]));
++	memset(algo->assign_way, 0, (cols + 1) * sizeof(algo->assign_way[0]));
++	for (i = 1; i <= active_cnt; i++) {
++		s64 minv[HX_ASSIGN_COLS + 1];
++		bool used[HX_ASSIGN_COLS + 1] = { false };
++		int j0 = 0;
++
++		for (j = 0; j <= cols; j++)
++			minv[j] = inf;
++		algo->assign_p[0] = i;
++		do {
++			int i0, j1 = 0;
++			s64 delta = inf;
++
++			used[j0] = true;
++			i0 = algo->assign_p[j0];
++			for (j = 1; j <= cols; j++) {
++				s64 cur;
++
++				if (used[j])
++					continue;
++				cur = algo->assign_cost[i0 - 1][j - 1] -
++					algo->assign_u[i0] - algo->assign_v[j];
++				if (cur < minv[j]) {
++					minv[j] = cur;
++					algo->assign_way[j] = j0;
++				}
++				if (minv[j] < delta) {
++					delta = minv[j];
++					j1 = j;
++				}
++			}
++			for (j = 0; j <= cols; j++) {
++				if (used[j]) {
++					algo->assign_u[algo->assign_p[j]] += delta;
++					algo->assign_v[j] -= delta;
++				} else {
++					minv[j] -= delta;
++				}
++			}
++			j0 = j1;
++		} while (algo->assign_p[j0]);
++		do {
++			int j1 = algo->assign_way[j0];
++
++			algo->assign_p[j0] = algo->assign_p[j1];
++			j0 = j1;
++		} while (j0);
++	}
++
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++)
++		match[i] = -1;
++	for (j = 1; j <= det_cnt; j++) {
++		int row = algo->assign_p[j];
++
++		if (row && algo->assign_cost[row - 1][j - 1] < inf / 2)
++			match[active[row - 1]] = j - 1;
++	}
++}
++
++static bool hx_is_unconfirmed_split(struct hx_algo *algo,
++				    const struct input_mt_pos *det, int candidate,
++				    const u8 *active, int active_cnt,
++				    const s8 *match, const u8 *prior_peak_id)
++{
++	const struct hx_contact *contact;
++	int reported_tracks = 0;
++	int i;
++
++	if (candidate >= algo->contact_count)
++		return false;
++	contact = &algo->contacts[candidate];
++	for (i = 0; i < active_cnt; i++)
++		if (algo->tracks[active[i]].reported)
++			reported_tracks++;
++
++	for (i = 0; i < active_cnt; i++) {
++		int ti = active[i];
++		int di = match[ti];
++		bool same_zone;
++		bool handoff_residual;
++		bool continuing_residual = false;
++		u8 confirm_frames;
++		s32 confirm_dist2;
++		s32 dx, dy;
++
++		if (di < 0 || di >= algo->contact_count ||
++		    !algo->tracks[ti].reported || di == candidate)
++			continue;
++		same_zone = contact->source_zone_index ==
++			algo->contacts[di].source_zone_index;
++		handoff_residual = prior_peak_id[ti] &&
++			contact->source_peak_id == prior_peak_id[ti] &&
++			algo->contacts[di].source_peak_id &&
++			algo->contacts[di].source_peak_id != prior_peak_id[ti];
++		for (int k = 0; k < HX_MAX_PEAKS; k++)
++			if (contact->source_peak_id &&
++			    algo->peak_competition[k].peak_id ==
++				contact->source_peak_id) {
++				continuing_residual =
++					algo->peak_competition[k].handoff_residual;
++				break;
++			}
++		/* Separate macro zones can still be two lobes of one moving finger.
++		 * Apply the shorter cross-zone guard only to a single reported touch;
++		 * established multi-touch must not acquire extra latency.
++		 */
++		if (!handoff_residual && !continuing_residual && !same_zone &&
++		    reported_tracks != 1)
++			continue;
++		confirm_frames = (same_zone || handoff_residual ||
++			continuing_residual) ?
++			algo->split_peak_confirm_frames :
++			algo->split_cross_zone_confirm_frames;
++		confirm_dist2 = same_zone ? algo->split_peak_dist2 :
++			algo->split_cross_zone_dist2;
++		if (confirm_frames <= 1)
++			continue;
++		dx = det[candidate].x - det[di].x;
++		dy = det[candidate].y - det[di].y;
++		if (handoff_residual || continuing_residual ||
++		    (s64)dx * dx + (s64)dy * dy <=
++		    max_t(s32, confirm_dist2, 1)) {
++			u8 competition_age = 1;
++			int k, free_slot = -1;
++
++			/* Count from the first frame this peak is an unmatched
++			 * competitor, not from its absolute peak lifetime.
++			 */
++			for (k = 0; k < HX_MAX_PEAKS; k++) {
++				struct hx_peak_competition *pc =
++					&algo->peak_competition[k];
++
++				if (pc->peak_id == contact->source_peak_id &&
++				    contact->source_peak_id) {
++					if (!pc->seen && pc->age < U8_MAX)
++						pc->age++;
++					pc->seen = true;
++					pc->handoff_residual |= handoff_residual;
++					competition_age = pc->age;
++					break;
++				}
++				if (free_slot < 0 && (!pc->peak_id || !pc->seen))
++					free_slot = k;
++			}
++			if (k == HX_MAX_PEAKS && contact->source_peak_id &&
++			    free_slot >= 0) {
++				struct hx_peak_competition *pc =
++					&algo->peak_competition[free_slot];
++
++				pc->peak_id = contact->source_peak_id;
++				pc->age = 1;
++				pc->seen = true;
++				pc->handoff_residual = handoff_residual;
++			}
++			if (competition_age >= confirm_frames)
++				continue;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			algo->diag_split_peak_deferred++;
++			if (!same_zone)
++				algo->diag_cross_zone_split_deferred++;
++			if (handoff_residual || continuing_residual)
++				algo->diag_handoff_residual_deferred++;
++#endif
++			return true;
++		}
++	}
++	return false;
++}
++
++void hx_track_contacts(struct hx_algo *algo,
++		       struct input_mt_pos *det, int det_cnt)
++{
++	bool det_used[HIMAX_MAX_TOUCH] = { false };
++	bool target_has_regular[HIMAX_MAX_TOUCH] = { false };
++	bool target_has_same_peak[HIMAX_MAX_TOUCH] = { false };
++	u8 prior_peak_id[HIMAX_MAX_TOUCH] = { 0 };
++	u8 active[HIMAX_MAX_TOUCH];
++	s8 match[HIMAX_MAX_TOUCH];
++	u16  jump_released = 0;  /* bitmask: slots freed by jump detection */
++	int active_cnt = 0;
++	int i, j;
++	const s64 inf = (s64)1 << 55;
++
++	for (i = 0; i < HX_MAX_PEAKS; i++)
++		algo->peak_competition[i].seen = false;
++
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++		if (algo->tracks[i].active) {
++			prior_peak_id[i] = algo->tracks[i].source_peak_id;
++			active[active_cnt++] = i;
++		}
++	}
++	/* A regular detection always wins over a continuation-only fallback for
++	 * the same slot.  Otherwise Hungarian could consume the tiny split peak
++	 * for the old slot and let the regular peak bootstrap a duplicate slot.
++	 */
++	for (i = 0; i < active_cnt; i++) {
++		int ti = active[i];
++		struct hx_track *trk = &algo->tracks[ti];
++		s64 gate2 = max_t(s64, algo->track_dist2_max, 1);
++
++		if (trk->missed)
++			gate2 *= min_t(s32, (s32)trk->missed + 1, 4);
++		for (j = 0; j < det_cnt; j++) {
++			struct hx_contact *ct = j < algo->contact_count ?
++				&algo->contacts[j] : NULL;
++
++			if (j < algo->contact_count &&
++			    algo->contacts[j].continuation_only)
++				continue;
++			if (hx_dist2_predicted(&det[j], trk) <= gate2) {
++				target_has_regular[ti] = true;
++				if (ct && trk->source_peak_id &&
++				    ct->source_peak_id == trk->source_peak_id)
++					target_has_same_peak[ti] = true;
++			}
++		}
++	}
++	for (i = 0; i < active_cnt; i++) {
++		int ti = active[i];
++		struct hx_track *trk = &algo->tracks[ti];
++		s64 unmatched = max_t(s64, algo->track_dist2_max, 1) * 16;
++
++		for (j = 0; j < det_cnt; j++) {
++			s64 d2 = hx_dist2_predicted(&det[j], trk);
++			s64 gate2 = max_t(s64, algo->track_dist2_max, 1);
++			s64 cost = d2;
++			struct hx_contact *ct = j < algo->contact_count ?
++				&algo->contacts[j] : NULL;
++
++			if (trk->missed)
++				gate2 *= min_t(s32, (s32)trk->missed + 1, 4);
++			if (ct && ct->continuation_only &&
++			    (ct->continuation_track_slot != ti ||
++			     target_has_regular[ti]))
++				algo->assign_cost[i][j] = inf;
++			else if (d2 <= gate2) {
++				/* Peak IDs are continuity hints, not hard ownership.  A
++				 * hard lock strands a fast-moving finger on its old residual
++				 * lobe and turns the real moving lobe into a second slot.
++				 */
++				if (ct && trk->source_peak_id && ct->source_peak_id &&
++				    trk->source_peak_id != ct->source_peak_id) {
++					s64 age_weight = 1 +
++						min_t(u8, trk->source_peak_age, 20) / 10;
++
++					if (target_has_same_peak[ti])
++						cost = hx_dist2_motion_ray(&det[j], trk);
++
++					cost += (s64)algo->track_peak_id_penalty *
++						age_weight;
++				}
++				algo->assign_cost[i][j] = cost;
++			} else {
++				algo->assign_cost[i][j] = inf;
++			}
++		}
++		for (j = det_cnt; j < det_cnt + active_cnt; j++)
++			algo->assign_cost[i][j] = unmatched;
++	}
++	if (algo->hungarian_enabled) {
++		hx_hungarian_assign(algo, active, active_cnt, det_cnt, match);
++	} else {
++		memset(match, -1, sizeof(match));
++		for (i = 0; i < active_cnt; i++) {
++			s64 best = inf;
++
++			for (j = 0; j < det_cnt; j++)
++				if (!det_used[j] && algo->assign_cost[i][j] < best) {
++					best = algo->assign_cost[i][j];
++					match[active[i]] = j;
++				}
++			if (match[active[i]] >= 0)
++				det_used[match[active[i]]] = true;
++		}
++		memset(det_used, 0, sizeof(det_used));
++	}
++
++	for (i = 0; i < active_cnt; i++) {
++		int ti = active[i];
++		int di = match[ti];
++		struct hx_track *trk = &algo->tracks[ti];
++
++		if (di < 0)
++			continue;
++
++		/* Jump detection: if the actual (non-predicted) displacement
++		 * exceeds the jump threshold, this is a finger swap, not a
++		 * slide.  Release the old slot and let the detection spawn
++		 * a new track at a *different* slot so that lift + press
++		 * both appear in the same SYN_REPORT (zero added latency).
++		 */
++		if (algo->track_jump_dist2 > 0 && trk->age >= 2) {
++			s32 dx = det[di].x - trk->x;
++			s32 dy = det[di].y - trk->y;
++			s64 actual_d2 = (s64)dx * dx + (s64)dy * dy;
++
++			if (actual_d2 > algo->track_jump_dist2) {
++				hx_reset_track(trk);
++				jump_released |= (1u << ti);
++				/* det stays unused → picked up by new-slot logic */
++				continue;
++			}
++		}
++
++		hx_filter_track(algo, trk, &det[di]);
++		trk->missed = 0;
++		if (di < algo->contact_count)
++			trk->signal_sum = algo->contacts[di].signal_sum;
++		if (di < algo->contact_count &&
++		    algo->contacts[di].source_peak_id) {
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			if (target_has_same_peak[ti] && trk->source_peak_id &&
++			    trk->source_peak_id !=
++				algo->contacts[di].source_peak_id)
++				algo->diag_peak_id_handoffs++;
++#endif
++			trk->source_peak_id = algo->contacts[di].source_peak_id;
++			trk->source_peak_age = algo->contacts[di].source_peak_age;
++		}
++		if (trk->age < U8_MAX)
++			trk->age++;
++		if (trk->debounce > 0)
++			trk->debounce--;
++		det_used[di] = true;
++	}
++
++	/* Age or release unmatched tracks. */
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++		struct hx_track *trk = &algo->tracks[i];
++
++		if (!trk->active || match[i] >= 0)
++			continue;
++
++		/*
++		 * Before the first stable touch is established, drop stray
++		 * tracks immediately to prevent noise from being reported.
++		 */
++		if (!trk->reported ||
++		    (algo->track_active_guard && !algo->touch_active)) {
++			hx_reset_track(trk);
++			continue;
++		}
++
++		trk->missed++;
++		if (trk->missed > algo->track_lost_frames)
++			hx_reset_track(trk);
++	}
++
++	/* Create new slots for unmatched detections. */
++	for (j = 0; j < det_cnt; j++) {
++		struct hx_track *trk = NULL;
++
++		if (det_used[j])
++			continue;
++		if (j < algo->contact_count &&
++		    algo->contacts[j].continuation_only)
++			continue;
++		if (hx_is_unconfirmed_split(algo, det, j, active, active_cnt,
++					    match, prior_peak_id))
++			continue;
++
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++			if (!algo->tracks[i].active &&
++			    !(jump_released & (1u << i))) {
++				trk = &algo->tracks[i];
++				break;
++			}
++		}
++		if (!trk)
++			continue;
++
++		trk->active   = true;
++		trk->age      = 1;
++		trk->missed   = 0;
++		trk->debounce = algo->debounce_base;
++		if (j < algo->contact_count) {
++			if (algo->contacts[j].signal_sum < algo->debounce_strong_signal)
++				trk->debounce += algo->debounce_weak_extra;
++			if (algo->contacts[j].is_edge)
++				trk->debounce += algo->debounce_edge_extra;
++			trk->source_peak_id = algo->contacts[j].source_peak_id;
++			trk->source_peak_age = algo->contacts[j].source_peak_age;
++		}
++		if (algo->fast_edge_start_pending && active_cnt == 0 &&
++		    det_cnt == 1 && j == 0 && j < algo->contact_count &&
++		    (algo->contacts[j].is_edge ||
++		     algo->contacts[j].fast_start_candidate)) {
++			trk->debounce = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			algo->diag_fast_edge_starts++;
++#endif
++		}
++		trk->x        = det[j].x;
++		trk->y        = det[j].y;
++		trk->vx       = 0;
++		trk->vy       = 0;
++		trk->filtered_x_q8 = det[j].x << 8;
++		trk->filtered_y_q8 = det[j].y << 8;
++		if (j < algo->contact_count)
++			trk->signal_sum = algo->contacts[j].signal_sum;
++		trk->reported = trk->debounce == 0 && algo->touch_active;
++	}
++
++	for (i = 0; i < HX_MAX_PEAKS; i++)
++		if (!algo->peak_competition[i].seen)
++			memset(&algo->peak_competition[i], 0,
++			       sizeof(algo->peak_competition[i]));
++}
++
++int hx_count_stable_tracks(struct hx_algo *algo)
++{
++	int i, cnt = 0;
++
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++		if (algo->tracks[i].active && algo->tracks[i].reported)
++			cnt++;
++	}
++	return cnt;
++}
++
++static void hx_suppress_rx_ghosts(struct hx_algo *algo,
++				  struct input_mt_pos *det, int *det_cnt)
++{
++	bool drop[HIMAX_MAX_TOUCH] = { false };
++	int i, j, dst;
++
++	if (!algo->ghost_enabled)
++		return;
++	for (i = 0; i < *det_cnt; i++) {
++		for (j = i + 1; j < *det_cnt; j++) {
++			int weak, strong, ti;
++			bool linked = false;
++
++			if (abs(det[i].y - det[j].y) > algo->ghost_row_distance ||
++			    abs(det[i].x - det[j].x) < algo->ghost_min_col_distance)
++				continue;
++			strong = algo->contacts[i].signal_sum >=
++				 algo->contacts[j].signal_sum ? i : j;
++			weak = strong == i ? j : i;
++			if ((s64)algo->contacts[weak].signal_sum * 256 >
++			    (s64)algo->contacts[strong].signal_sum *
++				algo->ghost_weak_ratio_q8)
++				continue;
++			for (ti = 0; ti < HIMAX_MAX_TOUCH; ti++)
++				if (algo->tracks[ti].active &&
++				    hx_dist2_predicted(&det[weak], &algo->tracks[ti]) <=
++					algo->track_dist2_max) {
++					linked = true;
++					break;
++				}
++			if (!linked)
++				drop[weak] = true;
++		}
++	}
++	for (i = 0, dst = 0; i < *det_cnt; i++) {
++		if (drop[i])
++			continue;
++		if (dst != i) {
++			det[dst] = det[i];
++			algo->contacts[dst] = algo->contacts[i];
++		}
++		dst++;
++	}
++	*det_cnt = dst;
++	algo->contact_count = dst;
++}
++
++#ifdef HX_ALGO_HOST_TEST
++int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw)
++{
++	return hx_algo_process_frame_state(algo, raw, HX_FINGER_UNKNOWN);
++}
++#endif
++
++int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
++				enum hx_finger_state finger_state)
++{
++	struct input_mt_pos det[HIMAX_MAX_TOUCH];
++	bool firmware_finger_rising = false;
++	bool has_active_track = false;
++	int det_cnt = 0;
++	int reported = 0;
++	int stable = 0;
++	int i;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	s16 frame_max = 0;
++
++	algo->diag_frame_seq++;
++#endif
++
++	if (finger_state == HX_FINGER_PRESENT) {
++		firmware_finger_rising = !algo->firmware_finger_present;
++		algo->firmware_finger_present = true;
++	} else if (finger_state == HX_FINGER_ABSENT) {
++		algo->firmware_finger_present = false;
++	}
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++)
++		if (algo->tracks[i].active) {
++			has_active_track = true;
++			break;
++		}
++	algo->fast_edge_start_pending = algo->firmware_edge_fast_start &&
++		firmware_finger_rising && !has_active_track;
++	hx_preprocess_frame_state(algo, raw, finger_state);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	for (i = 0; i < HX_PIXELS; i++)
++		frame_max = max(frame_max, ((s16 *)algo->frame)[i]);
++	algo->diag_frame_max = frame_max;
++#endif
++
++	/* The controller's master-frame status is authoritative for lift-off.
++	 * Do not let matrix rebound or the tracker's silent-gap window extend an
++	 * already confirmed UP event.  The gap window remains useful for UNKNOWN
++	 * status (host tests/legacy callers) and invalid frames, which never enter
++	 * this function from the IRQ path.
++	 */
++	if (finger_state == HX_FINGER_ABSENT) {
++		algo->zone_count = 0;
++		algo->peak_count = 0;
++		algo->prev_peak_count = 0;
++		algo->contact_count = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		algo->diag_zones = 0;
++		algo->diag_peaks = 0;
++		algo->diag_contacts_pre_filter = 0;
++		algo->diag_contacts_post_filter = 0;
++#endif
++		for (i = 0; i < HIMAX_MAX_TOUCH; i++)
++			hx_reset_track(&algo->tracks[i]);
++		goto update_state;
++	}
++
++	hx_detect_macro_zones(algo);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_zones = algo->zone_count;
++#endif
++	hx_reject_palms(algo);
++	hx_detect_peaks(algo);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_peaks = algo->peak_count;
++#endif
++	hx_expand_and_resolve(algo, det, &det_cnt);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_contacts_pre_filter = det_cnt;
++#endif
++	hx_suppress_rx_ghosts(algo, det, &det_cnt);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_contacts_post_filter = det_cnt;
++#endif
++	/* Himax coordinate-reporting drivers trust a valid firmware finger-on
++	 * transition and report its first coordinate immediately.  Our raw-matrix
++	 * path still requires the candidate to survive palm, edge and ghost
++	 * filtering, and only grants that confidence to one initial edge contact.
++	 * A sustained firmware-present state cannot validate later edge noise.
++	 */
++	algo->fast_edge_start_pending = algo->firmware_edge_fast_start &&
++		firmware_finger_rising && !has_active_track && det_cnt == 1 &&
++		algo->contact_count == 1 &&
++		(algo->contacts[0].is_edge ||
++		 algo->contacts[0].fast_start_candidate) &&
++		!algo->contacts[0].continuation_only;
++	hx_track_contacts(algo, det, det_cnt);
++	algo->fast_edge_start_pending = false;
++
++update_state:
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++)
++		if (algo->tracks[i].active && algo->tracks[i].debounce == 0)
++			stable++;
++	if (stable) {
++		if (!algo->touch_active &&
++		    ++algo->touch_start_frames >= algo->track_start_debounce)
++			algo->touch_active = true;
++	} else {
++		algo->touch_start_frames = 0;
++		algo->touch_active = false;
++	}
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_active_tracks = 0;
++	algo->diag_reported_tracks = 0;
++#endif
++	for (i = 0; i < HIMAX_MAX_TOUCH; i++) {
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		if (algo->tracks[i].active)
++			algo->diag_active_tracks++;
++#endif
++		if (algo->tracks[i].active && algo->tracks[i].debounce == 0 &&
++		    algo->touch_active)
++			algo->tracks[i].reported = true;
++		if (algo->tracks[i].active && algo->tracks[i].reported)
++			reported++;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		if (algo->tracks[i].reported)
++			algo->diag_reported_tracks++;
++#endif
++	}
++
++	return reported;
++}
+diff --git a/drivers/input/touchscreen/hx-algo.c b/drivers/input/touchscreen/hx-algo.c
+new file mode 100644
+index 000000000..a65ed0ab1
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo.c
+@@ -0,0 +1,455 @@
++// SPDX-License-Identifier: GPL-2.0
++/* Himax HX83121A algorithm state and wake handling. */
++
++#ifdef HX_ALGO_HOST_TEST
++#include "../tests/host-compat.h"
++#else
++#include <linux/kernel.h>
++#include <linux/limits.h>
++#include <linux/math64.h>
++#include <linux/string.h>
++#endif
++
++#include "hx-algo-internal.h"
++
++#define HIMAX_TRACK_MATCH_DIST2   (420 * 420)
++#define HIMAX_TRACK_LOST_FRAMES   4
++#define HIMAX_NEW_TOUCH_DEBOUNCE  1
++
++void hx_algo_init_defaults(struct hx_algo *algo)
++{
++	/* Values track the current Windows solver defaults.  The baseline is
++	 * adaptive per cell; using one immutable 0x7ffe value was a major source
++	 * of weak-frame loss after temperature/VCOM/common-mode drift.
++	 */
++	algo->baseline_enabled              = true;
++	algo->baseline_initial              = 0x7fee;
++	algo->baseline_noise_deadband       = 90;
++	algo->baseline_positive_deadband    = 14;
++	algo->baseline_negative_deadband    = 13;
++	algo->baseline_peak_threshold       = 305;
++	algo->baseline_release_hold_frames  = 60;
++	algo->baseline_positive_alpha_shift = 7;
++	algo->baseline_negative_alpha_shift = 5;
++	algo->baseline_noise_alpha_shift    = 6;
++	algo->baseline_positive_max_step    = 20;
++	algo->baseline_negative_max_step    = 20;
++	algo->baseline_background_alpha_shift = 3;
++	algo->baseline_no_finger_alpha_shift = 3;
++	algo->baseline_recovery_alpha_shift = 2;
++	algo->baseline_background_max_step = 512;
++	algo->baseline_no_finger_max_step = 512;
++	algo->baseline_recovery_max_step = 256;
++	algo->baseline_recovery_max_frames = 30;
++	algo->baseline_noise_tracking = true;
++	algo->wake_stable_frames = 6;
++	algo->wake_finger_safe_frames = 3;
++	algo->wake_raw_jump_threshold = 160;
++	algo->wake_max_unstable_nodes = 24;
++	algo->wake_max_unstable_line_nodes = 12;
++	algo->safe_commit_no_finger_frames = 30;
++	algo->runtime_noise_threshold = 1800;
++	algo->runtime_noise_line_nodes = 20;
++	algo->runtime_noise_total_nodes = 180;
++	algo->cmf_enabled        = true;
++	algo->cmf_exclusion      = 2000;
++	algo->cmf_max_correction = 2000;
++	/* v1.1.2 removed GridIIR from the active pipeline.  Keep the compatible
++	 * sysfs implementation available, but do not enable it by default.
++	 */
++	algo->iir_enabled        = false;
++	algo->iir_decay_weight   = 200;
++	algo->iir_decay_step     = 80;
++	algo->iir_noise_floor    = 5;
++	algo->iir_gate_floor     = 200;
++	algo->iir_gate_ratio_q8  = 26;
++	algo->macro_threshold    = 280;
++	algo->peak_threshold     = 280;
++	algo->peak_local_radius = 1;
++	algo->peak_z8_enabled = true;
++	algo->peak_saddle_enabled = true;
++	algo->peak_saddle_radius = 2;
++	algo->peak_saddle_drop = 80;
++	algo->peak_signal_threshold_limit = 1000;
++	algo->peak_edge_threshold = 300;
++	algo->peak_macro_min_area = 3;
++	algo->peak_continue_min_area = 1;
++	algo->peak_continue_min_signal = 900;
++	algo->peak_single_track_continue_min_signal = 650;
++	algo->peak_continue_dist2 = 220 * 220;
++	algo->peak_fast_start_min_signal = 1500;
++	algo->peak_fast_start_edge_cells = 4;
++	algo->palm_enabled       = true;
++	algo->palm_area_threshold    = 50;
++	algo->palm_signal_threshold  = 80000;
++	algo->palm_density_low       = 400;
++	algo->palm_box_enabled = true;
++	algo->palm_box_expand_rows = 9;
++	algo->palm_box_expand_cols = 10;
++	algo->palm_box_match_distance = 6;
++	algo->palm_box_max_hold = 0;
++	algo->zone_cleanup_enabled = true;
++	algo->zone_max_radius = 3;
++	algo->zone_threshold_numer = 0x40;
++	algo->zone_threshold_shift = 7;
++	algo->pressure_enabled   = false;
++	algo->edge_comp_enabled = true;
++	algo->edge_boost_pct   = 50;   /* 50% signal boost on border pixels  */
++	algo->edge_push_q8     = 128;  /* push up to 0.5 grid cells outward  */
++	algo->edge_blend_q8    = 512;  /* blend over 2 grid cells from edge  */
++	algo->edge_reject_enabled = true;
++	algo->edge_reject_margin = 24;
++	algo->edge_reject_min_signal = 500;
++	algo->track_dist2_max   = HIMAX_TRACK_MATCH_DIST2;
++	algo->track_lost_frames = HIMAX_TRACK_LOST_FRAMES;
++	algo->debounce_base     = HIMAX_NEW_TOUCH_DEBOUNCE;
++	algo->track_smoothing   = true;
++	algo->track_active_guard   = true;
++	algo->track_start_debounce = 1;
++	algo->track_jump_dist2     = 0;  /* disabled by default */
++	algo->hungarian_enabled = true;
++	algo->debounce_weak_extra = 1;
++	algo->debounce_edge_extra = 1;
++	algo->debounce_strong_signal = 3000;
++	algo->firmware_edge_fast_start = true;
++	algo->split_peak_confirm_frames = 8;
++	algo->split_peak_dist2 = 300 * 300;
++	algo->split_cross_zone_confirm_frames = 4;
++	algo->split_cross_zone_dist2 = 180 * 180;
++	algo->track_peak_id_penalty = 40 * 40;
++	algo->ghost_enabled = true;
++	algo->ghost_row_distance = 32;
++	algo->ghost_weak_ratio_q8 = 96;
++	algo->ghost_min_col_distance = 300;
++	algo->euro_enabled = true;
++	algo->euro_alpha_min_q8 = 64;
++	algo->euro_alpha_max_q8 = 224;
++	algo->euro_speed_threshold = 24;
++}
++
++static void hx_algo_clear_transient_state(struct hx_algo *algo)
++{
++	/* Scratch/result arrays are guarded by their counts or cleared by the
++	 * pipeline stage that consumes them.  Reset only persistent state here;
++	 * bulk-clearing every backing array added latency without changing what
++	 * the next frame can observe.
++	 */
++	memset(algo->frame, 0, sizeof(algo->frame));
++	memset(algo->peak_competition, 0, sizeof(algo->peak_competition));
++	memset(algo->baseline_release_hold, 0,
++	       sizeof(algo->baseline_release_hold));
++	memset(algo->tracks, 0, sizeof(algo->tracks));
++	/* An invalid history makes the first frame after a runtime IIR enable
++	 * seed the complete buffer before it is read.
++	 */
++	algo->iir_initialized = false;
++	/* Preserve the converged per-cell baseline across display/lid/idle and
++	 * hardware reinitialisation.  Force the next valid frame to re-evaluate
++	 * recovery instead of inheriting a stale touch/freeze transition.
++	 */
++	algo->baseline_prev_had_signal = false;
++	algo->baseline_had_freeze = algo->baseline_initialized;
++	algo->baseline_recovery_frames = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->diag_frame_seq = 0;
++	algo->diag_common_diff = 0;
++	algo->diag_frame_max = 0;
++	algo->diag_has_signal = 0;
++	algo->diag_zones = 0;
++	algo->diag_peaks = 0;
++	algo->diag_contacts_pre_filter = 0;
++	algo->diag_contacts_post_filter = 0;
++	algo->diag_active_tracks = 0;
++	algo->diag_reported_tracks = 0;
++#endif
++	algo->zone_arena_used = 0;
++	algo->zone_count = 0;
++	algo->peak_count = 0;
++	algo->prev_peak_count = 0;
++	algo->next_peak_id = 1;
++	algo->contact_count = 0;
++	algo->palm_box_count = 0;
++	algo->touch_active = false;
++	algo->touch_start_frames = 0;
++	algo->firmware_finger_present = false;
++	algo->fast_edge_start_pending = false;
++}
++
++void hx_algo_clear_live_state(struct hx_algo *algo)
++{
++	hx_algo_clear_transient_state(algo);
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->live_clear_count++;
++#endif
++}
++
++void hx_algo_full_reset(struct hx_algo *algo)
++{
++	hx_algo_clear_transient_state(algo);
++	memset(algo->baseline_q8, 0, sizeof(algo->baseline_q8));
++	memset(algo->safe_baseline_q8, 0, sizeof(algo->safe_baseline_q8));
++	memset(algo->wake_candidate_q8, 0,
++	       sizeof(algo->wake_candidate_q8));
++	algo->baseline_initialized = false;
++	algo->safe_baseline_valid = false;
++	algo->wake_qualifying = false;
++	algo->wake_candidate_valid = false;
++	algo->wake_needs_double_confirm = false;
++	algo->wake_candidate_frames = 0;
++	algo->wake_finger_frames = 0;
++	algo->safe_no_finger_frames = 0;
++	algo->baseline_prev_had_signal = false;
++	algo->baseline_had_freeze = false;
++	algo->baseline_recovery_frames = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->baseline_generation++;
++	algo->full_reset_count++;
++#endif
++}
++
++void hx_copy_raw_to_baseline(s32 *dst, const u16 *raw)
++{
++	int i;
++
++	for (i = 0; i < HX_PIXELS; i++)
++		dst[i] = (s32)le16_to_cpup(raw + i) <<
++			 HX_BASELINE_FRACTION_BITS;
++}
++
++void hx_algo_begin_wake(struct hx_algo *algo)
++{
++	hx_algo_clear_transient_state(algo);
++	algo->wake_qualifying = true;
++	algo->wake_candidate_valid = false;
++	algo->wake_needs_double_confirm = false;
++	algo->wake_candidate_frames = 0;
++	algo->wake_finger_frames = 0;
++	algo->safe_no_finger_frames = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->live_clear_count++;
++#endif
++}
++
++int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
++			       enum hx_finger_state finger_state)
++{
++	u8 row_unstable[HX_ROWS] = { 0 };
++	u8 col_unstable[HX_COLS] = { 0 };
++	u16 out_of_range = 0;
++	u16 unstable = 0;
++	u8 required_frames;
++	int i;
++
++	if (!algo->wake_qualifying)
++		return HX_WAKE_QUALITY_READY;
++	for (i = 1; i < HX_PIXELS; i++) {
++		u16 sample = le16_to_cpup(raw + i);
++
++		if (sample < 0x1000 || sample > 0xf000)
++			out_of_range++;
++	}
++	if (out_of_range > algo->wake_max_unstable_nodes) {
++		algo->wake_candidate_valid = false;
++		algo->wake_candidate_frames = 0;
++		algo->wake_needs_double_confirm = false;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		algo->wake_candidate_reject_count++;
++#endif
++		return HX_WAKE_QUALITY_REJECTED;
++	}
++
++	/* A finger already present at screen-on must never be learned into a new
++	 * baseline.  Use the last independently committed no-finger snapshot.
++	 */
++	if (finger_state == HX_FINGER_PRESENT) {
++		algo->wake_candidate_valid = false;
++		algo->wake_candidate_frames = 0;
++		algo->wake_needs_double_confirm = false;
++		if (algo->wake_finger_frames < U8_MAX)
++			algo->wake_finger_frames++;
++		if (algo->wake_finger_frames >= algo->wake_finger_safe_frames) {
++			if (algo->safe_baseline_valid) {
++				memcpy(algo->baseline_q8, algo->safe_baseline_q8,
++				       sizeof(algo->baseline_q8));
++			} else if (!algo->baseline_initialized) {
++				for (i = 0; i < HX_PIXELS; i++)
++					algo->baseline_q8[i] =
++						(s32)algo->baseline_initial <<
++						HX_BASELINE_FRACTION_BITS;
++			}
++			algo->baseline_initialized = true;
++			algo->wake_qualifying = false;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			algo->wake_safe_fallback_count++;
++			algo->wake_qualification_count++;
++#endif
++			return algo->safe_baseline_valid ?
++				HX_WAKE_QUALITY_USING_SAFE :
++				HX_WAKE_QUALITY_PROTECTED;
++		}
++		return HX_WAKE_QUALITY_PENDING;
++	}
++	algo->wake_finger_frames = 0;
++
++	if (!algo->wake_candidate_valid) {
++		hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
++		algo->wake_candidate_valid = true;
++		algo->wake_candidate_frames = 1;
++		return HX_WAKE_QUALITY_PENDING;
++	}
++
++	/* A candidate is only committed after several complete raw grids agree.
++	 * Count spatially-local changes; a panel-wide DC shift is naturally
++	 * represented by the first candidate and is not confused with activity.
++	 */
++	for (i = 1; i < HX_PIXELS; i++) {
++		s32 sample_q8 = (s32)le16_to_cpup(raw + i) <<
++				HX_BASELINE_FRACTION_BITS;
++		s32 delta = (sample_q8 - algo->wake_candidate_q8[i]) >>
++			    HX_BASELINE_FRACTION_BITS;
++
++		if (abs(delta) > algo->wake_raw_jump_threshold) {
++			row_unstable[i / HX_COLS]++;
++			col_unstable[i % HX_COLS]++;
++			unstable++;
++		}
++	}
++	for (i = 0; i < HX_ROWS; i++)
++		if (row_unstable[i] >= algo->wake_max_unstable_line_nodes)
++			unstable = algo->wake_max_unstable_nodes + 1;
++	for (i = 0; i < HX_COLS; i++)
++		if (col_unstable[i] >= algo->wake_max_unstable_line_nodes)
++			unstable = algo->wake_max_unstable_nodes + 1;
++	if (unstable > algo->wake_max_unstable_nodes) {
++		/* Start the next qualification window from the newest complete frame.
++		 * Do not poison either the working or last-safe baseline.
++		 */
++		hx_copy_raw_to_baseline(algo->wake_candidate_q8, raw);
++		algo->wake_candidate_frames = 1;
++		algo->wake_needs_double_confirm = false;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++		algo->wake_candidate_reject_count++;
++#endif
++		return HX_WAKE_QUALITY_REJECTED;
++	}
++
++	if (algo->wake_candidate_frames < U8_MAX)
++		algo->wake_candidate_frames++;
++	if (algo->wake_candidate_frames < algo->wake_stable_frames)
++		return HX_WAKE_QUALITY_PENDING;
++
++	/* A candidate that differs spatially from last-safe is not rejected just
++	 * because the display environment genuinely changed.  It must, however,
++	 * survive a second complete stability window before replacing last-safe.
++	 */
++	if (algo->safe_baseline_valid && !algo->wake_needs_double_confirm) {
++		s64 sum = 0;
++		s32 common;
++		u16 divergent = 0;
++
++		for (i = 1; i < HX_PIXELS; i++)
++			sum += (algo->wake_candidate_q8[i] -
++				algo->safe_baseline_q8[i]) >>
++				HX_BASELINE_FRACTION_BITS;
++		common = (s32)(sum / (HX_PIXELS - 1));
++		for (i = 1; i < HX_PIXELS; i++) {
++			s32 delta = ((algo->wake_candidate_q8[i] -
++				algo->safe_baseline_q8[i]) >>
++				HX_BASELINE_FRACTION_BITS) - common;
++
++			if (abs(delta) > algo->wake_raw_jump_threshold * 2)
++				divergent++;
++		}
++		if (divergent > algo->wake_max_unstable_nodes) {
++			algo->wake_needs_double_confirm = true;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++			algo->wake_safe_divergence_count++;
++#endif
++		}
++	}
++	required_frames = algo->wake_stable_frames;
++	if (algo->wake_needs_double_confirm)
++		required_frames = min_t(u8, algo->wake_stable_frames * 2,
++					 U8_MAX);
++	if (algo->wake_candidate_frames < required_frames)
++		return HX_WAKE_QUALITY_PENDING;
++
++	memcpy(algo->baseline_q8, algo->wake_candidate_q8,
++	       sizeof(algo->baseline_q8));
++	memcpy(algo->safe_baseline_q8, algo->wake_candidate_q8,
++	       sizeof(algo->safe_baseline_q8));
++	algo->baseline_initialized = true;
++	algo->safe_baseline_valid = true;
++	algo->wake_qualifying = false;
++	algo->wake_candidate_valid = false;
++	algo->wake_needs_double_confirm = false;
++	algo->baseline_prev_had_signal = false;
++	algo->baseline_had_freeze = false;
++	algo->baseline_recovery_frames = 0;
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->baseline_generation++;
++	algo->wake_baseline_commit_count++;
++	algo->wake_qualification_count++;
++#endif
++	return HX_WAKE_QUALITY_READY;
++}
++
++bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw)
++{
++	u8 col_bad[HX_COLS] = { 0 };
++	s64 sum = 0;
++	s32 common;
++	u16 total = 0;
++	int r, c;
++
++	if (!algo->baseline_initialized || algo->wake_qualifying)
++		return false;
++	for (r = 1; r < HX_PIXELS; r++)
++		sum += (s32)le16_to_cpup(raw + r) -
++		       (algo->baseline_q8[r] >> HX_BASELINE_FRACTION_BITS);
++	common = (s32)(sum / (HX_PIXELS - 1));
++
++	for (r = 0; r < HX_ROWS; r++) {
++		u8 row_bad = 0;
++
++		for (c = 0; c < HX_COLS; c++) {
++			int idx = r * HX_COLS + c;
++			s32 local;
++
++			if (!idx)
++				continue;
++			local = (s32)le16_to_cpup(raw + idx) -
++				(algo->baseline_q8[idx] >>
++				 HX_BASELINE_FRACTION_BITS) - common;
++			if (abs(local) >= algo->runtime_noise_threshold) {
++				row_bad++;
++				col_bad[c]++;
++				total++;
++			}
++		}
++		if (row_bad >= algo->runtime_noise_line_nodes)
++			goto exception;
++	}
++	for (c = 0; c < HX_COLS; c++)
++		if (col_bad[c] >= algo->runtime_noise_line_nodes)
++			goto exception;
++	if (total < algo->runtime_noise_total_nodes)
++		return false;
++
++exception:
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	algo->noise_frame_hold_count++;
++#endif
++	return true;
++}
++
++#ifdef HX_ALGO_HOST_TEST
++void hx_algo_reset_runtime(struct hx_algo *algo)
++{
++	hx_algo_clear_live_state(algo);
++}
++#endif
++
++/* ======================================================================== */
++/* Phase 1A — baseline subtraction                                          */
++/* ======================================================================== */
+diff --git a/drivers/input/touchscreen/hx-algo.h b/drivers/input/touchscreen/hx-algo.h
+new file mode 100644
+index 000000000..13d241070
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-algo.h
+@@ -0,0 +1,440 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++/*
++ * Himax HX83121A touch algorithm — data structures and interface.
++ *
++ * All algorithm state lives in struct hx_algo, which is allocated once in
++ * probe via devm_kzalloc and referenced from struct himax_ts_data.
++ */
++#ifndef HX_ALGO_H
++#define HX_ALGO_H
++
++#ifdef HX_ALGO_HOST_TEST
++#include <stdbool.h>
++#include <stdint.h>
++typedef uint8_t u8;
++typedef uint16_t u16;
++typedef uint32_t u32;
++typedef int8_t s8;
++typedef int16_t s16;
++typedef int32_t s32;
++typedef int64_t s64;
++struct input_mt_pos { int x; int y; };
++#else
++#include <linux/input/mt.h>
++#include <linux/types.h>
++#endif
++
++/* Grid dimensions — must match the firmware raw frame layout. */
++#define HX_ROWS        40
++#define HX_COLS        60
++#define HX_PIXELS      (HX_ROWS * HX_COLS)  /* 2400 */
++
++/* Detection limits */
++#define HX_MAX_ZONES   20
++#define HX_MAX_PEAKS   20
++#define HX_MAX_PALM_BOXES 8
++#define HX_ASSIGN_COLS (HIMAX_MAX_TOUCH * 2)
++#define HX_BASELINE_HIST_BINS 2048
++
++/* Maximum simultaneous reported contacts. */
++#define HIMAX_MAX_TOUCH 10
++
++/**
++ * struct hx_peak - single detected local-maximum candidate.
++ * @r:          row in the grid (0-based)
++ * @c:          column in the grid
++ * @z:          signal value at the peak
++ * @nbr_sum:    sum of all 8-neighbour signals (used for Z8 filter)
++ * @zone_area:  area of the macro-zone this peak belongs to
++ * @zone_index: index of the owning macro-zone
++ * @id:         persistent peak identity across adjacent frames
++ * @age:        consecutive matched-frame age (first frame is zero)
++ * @vr, @vc:    last matched grid velocity, used for peak-ID prediction
++ * @on_edge:    true when the peak lies on the outermost grid row or column
++ * @fast_start_candidate: firmware-confirmed strong, compact edge onset
++ * @continuation_only: candidate may only update its bound existing slot
++ * @continuation_track_slot: sole existing slot eligible for this candidate
++ */
++struct hx_peak {
++	u8  r;
++	u8  c;
++	s16 z;
++	s32 nbr_sum;
++	u16 zone_area;
++	u8  zone_index;
++	u8  id;
++	u8  age;
++	s8  vr;
++	s8  vc;
++	bool on_edge;
++	bool fast_start_candidate;
++	bool continuation_only;
++	s8   continuation_track_slot;
++};
++
++/**
++ * struct hx_contact - sub-pixel coordinate after centroid expansion.
++ * @x, @y:      Q8.8 fixed-point grid coordinates
++ * @area:       number of pixels contributing to this contact
++ * @signal_sum: integrated signal over the contact area
++ * @is_edge:    true when the originating peak lies on the grid boundary
++ * @fast_start_candidate: contact may bypass new-touch debounce on FW rising
++ * @peak_index: index of the peak that produced this contact
++ * @source_peak_id/source_peak_age: persistent source-peak identity
++ * @source_zone_index: owning macro-zone in the current frame
++ * @continuation_only: contact may not bootstrap a new tracking slot
++ * @continuation_track_slot: sole existing slot eligible for this contact
++ */
++struct hx_contact {
++	s32  x;
++	s32  y;
++	u16  area;
++	s32  signal_sum;
++	bool is_edge;
++	bool fast_start_candidate;
++	u8   peak_index;
++	u8   source_peak_id;
++	u8   source_peak_age;
++	u8   source_zone_index;
++	bool continuation_only;
++	s8   continuation_track_slot;
++};
++
++/**
++ * struct hx_track - persistent touch slot state.
++ * @active:     slot is in use
++ * @x, @y:      current output coordinates [0, 65535]
++ * @vx, @vy:    velocity in output units per frame (for prediction)
++ * @signal_sum: integrated signal (forwarded to pressure reporting)
++ * @age:        frames the slot has been active
++ * @missed:     consecutive frames the slot had no matching detection
++ * @debounce:   remaining debounce frames before the slot is reported
++ * @source_peak_id/source_peak_age: most recently matched source peak
++ */
++struct hx_track {
++	bool active;
++	bool reported;
++	s32  x;
++	s32  y;
++	s32  vx;
++	s32  vy;
++	s32  signal_sum;
++	u8   age;
++	u8   missed;
++	u8   debounce;
++	u8   source_peak_id;
++	u8   source_peak_age;
++	s32  filtered_x_q8;
++	s32  filtered_y_q8;
++	s32  deriv_x_q8;
++	s32  deriv_y_q8;
++};
++
++/* Age a possible second touch from the moment it starts competing with an
++ * existing reported track.  Peak lifetime is not suitable for this: a mature
++ * residual lobe can become unmatched for the first time after a split.
++ */
++struct hx_peak_competition {
++	u8 peak_id;
++	u8 age;
++	bool seen;
++	bool handoff_residual;
++};
++
++/**
++ * struct hx_macro_zone - contiguous above-threshold region.
++ * @arena_start: first pixel in hx_algo.zone_arena
++ * @area:       total pixel count
++ * @signal_sum: sum of positive pixel values within the zone
++ * @min_r … max_c: bounding box
++ */
++struct hx_macro_zone {
++	u16 arena_start;
++	u16 area;
++	s32 signal_sum;
++	u8  min_r;
++	u8  max_r;
++	u8  min_c;
++	u8  max_c;
++};
++
++struct hx_palm_box {
++	u8 min_r, max_r, min_c, max_c;
++	u16 missed;
++};
++
++/**
++ * struct hx_algo - all algorithm state, allocated once in probe.
++ *
++ * Memory budget: ~64 KB with three baseline grids.  Never allocate on the
++ * kernel stack.
++ */
++struct hx_algo {
++	/* ---- Frame buffers ---- */
++	s16 frame[HX_ROWS][HX_COLS];        /* baseline-subtracted signal  */
++	s16 iir_history[HX_ROWS][HX_COLS];  /* IIR temporal-filter history */
++	bool iir_initialized;
++
++	/* ---- Scratch buffers (shared between pipeline stages) ---- */
++	u8  visited[HX_PIXELS];              /* BFS visited flags           */
++	u8  zone_map[HX_PIXELS];             /* per-pixel zone-ID map       */
++	u16 bfs_queue[HX_PIXELS];            /* ring-buffer BFS queue       */
++	u16 zone_arena[HX_PIXELS];           /* all zone pixels, no truncation */
++	u16 zone_arena_used;
++
++	/* ---- Detection results ---- */
++	struct hx_macro_zone zones[HX_MAX_ZONES];
++	u8   zone_count;
++
++	struct hx_peak peaks[HX_MAX_PEAKS];
++	u8   peak_count;
++	struct hx_peak prev_peaks[HX_MAX_PEAKS];
++	u8   prev_peak_count;
++	u8   next_peak_id;
++	struct hx_peak_competition peak_competition[HX_MAX_PEAKS];
++
++	/* Keep every peak candidate until the final strength-based capacity cut.
++	 * The old implementation truncated the ascending peak list to ten first,
++	 * which selected the ten weakest candidates on noisy frames.
++	 */
++	struct hx_contact contacts[HX_MAX_PEAKS];
++	u8   contact_count;
++
++	/* ---- Per-cell adaptive baseline (Q8 fixed point) ---- */
++	s32 baseline_q8[HX_PIXELS];
++	/* Windows keeps several validated baselines instead of treating the
++	 * currently-learning grid as authoritative across every screen cycle.
++	 * Keep the minimum useful subset here: last committed safe data, a wake
++	 * candidate, and baseline_q8 as the live/working copy.
++	 */
++	s32 safe_baseline_q8[HX_PIXELS];
++	s32 wake_candidate_q8[HX_PIXELS];
++	u8  baseline_release_hold[HX_PIXELS];
++	u16 baseline_hist[HX_BASELINE_HIST_BINS];
++	bool baseline_initialized;
++	bool safe_baseline_valid;
++	bool wake_qualifying;
++	bool wake_candidate_valid;
++	bool wake_needs_double_confirm;
++	u8 wake_candidate_frames;
++	u8 wake_finger_frames;
++	u8 safe_no_finger_frames;
++	bool baseline_prev_had_signal;
++	bool baseline_had_freeze;
++	u8 baseline_recovery_frames;
++
++#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
++	/* Read-only pipeline snapshot for diagnosing hardware-only dropouts. */
++	u32 diag_frame_seq;
++	s32 diag_common_diff;
++	s16 diag_frame_max;
++	u8 diag_has_signal;
++	u8 diag_zones;
++	u8 diag_peaks;
++	u8 diag_contacts_pre_filter;
++	u8 diag_contacts_post_filter;
++	u8 diag_active_tracks;
++	u8 diag_reported_tracks;
++	u32 diag_small_peak_continued;
++	u32 diag_weak_peak_continued;
++	u32 diag_small_peak_rejected;
++	u32 diag_split_peak_deferred;
++	u32 diag_cross_zone_split_deferred;
++	u32 diag_peak_id_handoffs;
++	u32 diag_handoff_residual_deferred;
++	u32 diag_fast_edge_starts;
++	u32 baseline_generation;
++	u32 full_reset_count;
++	u32 live_clear_count;
++	u32 wake_qualification_count;
++	u32 wake_candidate_reject_count;
++	u32 wake_safe_fallback_count;
++	u32 wake_baseline_commit_count;
++	u32 wake_safe_divergence_count;
++	u32 baseline_safe_commit_count;
++	u32 noise_frame_hold_count;
++#endif
++
++	struct hx_palm_box palm_boxes[HX_MAX_PALM_BOXES];
++	u8 palm_box_count;
++
++	/* ---- Tracking state ---- */
++	struct hx_track tracks[HIMAX_MAX_TOUCH];
++	bool touch_active;
++	u8   touch_start_frames;
++	bool firmware_finger_present;
++	bool fast_edge_start_pending;
++
++	/* Hungarian scratch is kept off the kernel stack. */
++	s64 assign_cost[HIMAX_MAX_TOUCH][HX_ASSIGN_COLS];
++	s64 assign_u[HIMAX_MAX_TOUCH + 1];
++	s64 assign_v[HX_ASSIGN_COLS + 1];
++	u8 assign_p[HX_ASSIGN_COLS + 1];
++	u8 assign_way[HX_ASSIGN_COLS + 1];
++
++	/* ---- Tunable parameters (sysfs-writable, atomically updated) ---- */
++	/* Preprocessing */
++	bool baseline_enabled;
++	u16  baseline_initial;
++	s16  baseline_noise_deadband;
++	s16  baseline_positive_deadband;
++	s16  baseline_negative_deadband;
++	s16  baseline_peak_threshold;
++	u8   baseline_release_hold_frames;
++	u8   baseline_positive_alpha_shift;
++	u8   baseline_negative_alpha_shift;
++	u8   baseline_noise_alpha_shift;
++	s16  baseline_positive_max_step;
++	s16  baseline_negative_max_step;
++	u8   baseline_background_alpha_shift;
++	u8   baseline_no_finger_alpha_shift;
++	u8   baseline_recovery_alpha_shift;
++	s16  baseline_background_max_step;
++	s16  baseline_no_finger_max_step;
++	s16  baseline_recovery_max_step;
++	u8   baseline_recovery_max_frames;
++	bool baseline_noise_tracking;
++	u8   wake_stable_frames;
++	u8   wake_finger_safe_frames;
++	s16  wake_raw_jump_threshold;
++	u16  wake_max_unstable_nodes;
++	u8   wake_max_unstable_line_nodes;
++	u8   safe_commit_no_finger_frames;
++	s16  runtime_noise_threshold;
++	u8   runtime_noise_line_nodes;
++	u16  runtime_noise_total_nodes;
++	bool cmf_enabled;          /* CMF on/off (default: true)           */
++	s16  cmf_exclusion;        /* exclude pixels > this from CMF mean  */
++	s16  cmf_max_correction;   /* clamp per-row/col offset             */
++	bool iir_enabled;          /* IIR temporal filter on/off           */
++	u16  iir_decay_weight;     /* blend weight 0-256 (256 = no blend)  */
++	u16  iir_decay_step;       /* per-frame decay in signal units      */
++	s16  iir_noise_floor;      /* clamp-to-zero below this             */
++	s16  iir_gate_floor;       /* min dynamic threshold                */
++	u8   iir_gate_ratio_q8;    /* dyn threshold = max * ratio/256      */
++	/* Detection */
++	s16  macro_threshold;      /* minimum pixel value to seed BFS      */
++	s16  peak_threshold;       /* minimum peak signal                  */
++	u8   peak_local_radius;
++	bool peak_z8_enabled;
++	bool peak_saddle_enabled;
++	u8   peak_saddle_radius;
++	s16  peak_saddle_drop;
++	s16  peak_signal_threshold_limit;
++	s16  peak_edge_threshold;
++	u8   peak_macro_min_area;
++	u8   peak_continue_min_area;
++	s16  peak_continue_min_signal;
++	s16  peak_single_track_continue_min_signal;
++	s32  peak_continue_dist2;
++	s16  peak_fast_start_min_signal;
++	u8   peak_fast_start_edge_cells;
++	bool palm_enabled;         /* palm-rejection on/off                */
++	u8   palm_area_threshold;  /* area >= this → palm                  */
++	s32  palm_signal_threshold;/* signal_sum >= this → palm            */
++	s16  palm_density_low;     /* signal/area < this → palm            */
++	bool palm_box_enabled;
++	u8 palm_box_expand_rows;
++	u8 palm_box_expand_cols;
++	u8 palm_box_match_distance;
++	u16 palm_box_max_hold;
++	bool zone_cleanup_enabled;
++	u8 zone_max_radius;
++	u8 zone_threshold_numer;
++	u8 zone_threshold_shift;
++	/* Pressure / touch-major reporting */
++	bool pressure_enabled;     /* report PRESSURE + TOUCH_MAJOR        */
++	/* Edge compensation */
++	bool edge_comp_enabled;    /* edge compensation on/off             */
++	s16  edge_boost_pct;       /* signal boost for border pixels (%)   */
++	s16  edge_push_q8;         /* max outward push in Q8.8 (128=0.5)  */
++	s16  edge_blend_q8;        /* blend range in Q8.8 (512=2 cells)   */
++	bool edge_reject_enabled;
++	u16 edge_reject_margin;
++	s32 edge_reject_min_signal;
++	/* Tracking */
++	s32  track_dist2_max;      /* max squared distance for match       */
++	u8   track_lost_frames;    /* missed frames before slot release    */
++	u8   debounce_base;        /* new-slot debounce count              */
++	bool track_smoothing;      /* position smoothing on/off            */
++	bool track_active_guard;   /* kill stray tracks before 1st stable  */
++	u8   track_start_debounce; /* frames to confirm touch_active       */
++	s32  track_jump_dist2;     /* position jump → force lift+repress   */
++	bool hungarian_enabled;
++	u8 debounce_weak_extra;
++	u8 debounce_edge_extra;
++	s32 debounce_strong_signal;
++	bool firmware_edge_fast_start;
++	u8 split_peak_confirm_frames;
++	s32 split_peak_dist2;
++	u8 split_cross_zone_confirm_frames;
++	s32 split_cross_zone_dist2;
++	s32 track_peak_id_penalty;
++	bool ghost_enabled;
++	u16 ghost_row_distance;
++	u8 ghost_weak_ratio_q8;
++	u16 ghost_min_col_distance;
++	bool euro_enabled;
++	u8 euro_alpha_min_q8;
++	u8 euro_alpha_max_q8;
++	u16 euro_speed_threshold;
++};
++
++enum hx_finger_state {
++	HX_FINGER_UNKNOWN,
++	HX_FINGER_ABSENT,
++	HX_FINGER_PRESENT,
++};
++
++enum hx_wake_quality_result {
++	HX_WAKE_QUALITY_REJECTED = -1,
++	HX_WAKE_QUALITY_PENDING = 0,
++	HX_WAKE_QUALITY_READY = 1,
++	HX_WAKE_QUALITY_USING_SAFE = 2,
++	HX_WAKE_QUALITY_PROTECTED = 3,
++};
++
++/* ---- Public API ---- */
++
++void hx_algo_init_defaults(struct hx_algo *algo);
++void hx_algo_clear_live_state(struct hx_algo *algo);
++void hx_algo_full_reset(struct hx_algo *algo);
++void hx_algo_begin_wake(struct hx_algo *algo);
++int hx_algo_qualify_wake_frame(struct hx_algo *algo, const u16 *raw,
++			       enum hx_finger_state finger_state);
++bool hx_algo_is_exception_frame(struct hx_algo *algo, const u16 *raw);
++int hx_algo_process_frame_state(struct hx_algo *algo, const u16 *raw,
++				enum hx_finger_state finger_state);
++
++/* Phase 1: preprocessing (baseline subtraction, CMF, IIR) */
++void hx_preprocess_frame_state(struct hx_algo *algo, const u16 *raw,
++			       enum hx_finger_state finger_state);
++
++#ifdef HX_ALGO_HOST_TEST
++/* Convenience wrappers retained only for hardware-independent fixtures. */
++void hx_algo_reset_runtime(struct hx_algo *algo);
++int hx_algo_process_frame(struct hx_algo *algo, const u16 *raw);
++void hx_preprocess_frame(struct hx_algo *algo, const u16 *raw);
++#endif
++
++/* Phase 2A: macro-zone detection */
++void hx_detect_macro_zones(struct hx_algo *algo);
++
++/* Phase 2B: palm rejection */
++void hx_reject_palms(struct hx_algo *algo);
++
++/* Phase 2C: peak detection within surviving zones */
++void hx_detect_peaks(struct hx_algo *algo);
++
++/* Phase 2D: zone expansion + weighted centroid → contacts → output positions */
++void hx_expand_and_resolve(struct hx_algo *algo,
++			    struct input_mt_pos *pos, int *cnt);
++
++/* Phase 3A: Hungarian or greedy tracker update with velocity prediction */
++void hx_track_contacts(struct hx_algo *algo,
++		       struct input_mt_pos *det, int det_cnt);
++
++/* Count slots that have passed debounce */
++int hx_count_stable_tracks(struct hx_algo *algo);
++
++#endif /* HX_ALGO_H */
+diff --git a/drivers/input/touchscreen/hx-frame-status.h b/drivers/input/touchscreen/hx-frame-status.h
+new file mode 100644
+index 000000000..0e9705a1e
+--- /dev/null
++++ b/drivers/input/touchscreen/hx-frame-status.h
+@@ -0,0 +1,59 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef HX_FRAME_STATUS_H
++#define HX_FRAME_STATUS_H
++
++#ifdef HX_ALGO_HOST_TEST
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++typedef uint8_t hx_frame_u8;
++#else
++#include <linux/types.h>
++typedef u8 hx_frame_u8;
++#endif
++
++/* The Linux event-stack format has a four-byte header.  This differs from
++ * the seven-byte frame returned by the Windows THP interface.
++ */
++#define HX_FRAME_HEADER_BYTES 4U
++#define HX_FRAME_MATRIX_BYTES (60U * 40U * 2U)
++#define HX_FRAME_SUFFIX_BYTES 256U
++#define HX_FRAME_DIAG_VALID 0x00bbU
++
++struct hx_frame_status {
++	bool has_finger;
++	bool retry;
++};
++
++static inline unsigned int hx_frame_get_le16(const hx_frame_u8 *p)
++{
++	return (unsigned int)p[0] | ((unsigned int)p[1] << 8);
++}
++
++static inline bool
++hx_parse_master_frame_status(const hx_frame_u8 *buf, size_t len,
++			     struct hx_frame_status *status)
++{
++	const size_t suffix = HX_FRAME_HEADER_BYTES + HX_FRAME_MATRIX_BYTES;
++	unsigned int x, y;
++
++	if (!buf || !status || len < suffix + HX_FRAME_SUFFIX_BYTES)
++		return false;
++	/* Captured native event-stack master frames consistently use this sync
++	 * word.  Rejecting a shifted/non-master frame is safer than interpreting
++	 * its payload as a 40x60 capacitance matrix.
++	 */
++	if (buf[0] != 0x5a || buf[1] != 0xa5)
++		return false;
++	if (hx_frame_get_le16(buf + suffix + 6) != HX_FRAME_DIAG_VALID)
++		return false;
++
++	x = hx_frame_get_le16(buf + suffix + 108);
++	y = hx_frame_get_le16(buf + suffix + 110);
++	status->has_finger = !((x & 0xff) == 0xff &&
++			       (y & 0xff) == 0xff);
++	status->retry = hx_frame_get_le16(buf + suffix) != 0;
++	return true;
++}
++
++#endif /* HX_FRAME_STATUS_H */
+-- 
+2.53.0
