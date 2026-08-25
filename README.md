@@ -44,10 +44,10 @@ Installing or upgrading a kernel package refreshes the initramfs and the boot en
 
 ### Patch Sources
 
-- `upstream/*` and `others/0017`: adapted from [right-0903/linux-gaokun](https://github.com/right-0903/linux-gaokun) for the base SC8280XP / gaokun3 enablement, display bring-up, EC suspend/resume, ADSP FastRPC, and DSI stability work
+- `upstream/*` and `others/0005`: adapted from [right-0903/linux-gaokun](https://github.com/right-0903/linux-gaokun) for the base SC8280XP / gaokun3 enablement, display bring-up, EC suspend/resume, ADSP FastRPC, and DSI stability work
 - `others/0001`: adapted from [whitelewi1-ctrl/matebook-e-go-linux](https://github.com/whitelewi1-ctrl/matebook-e-go-linux) to avoid setting `USE_BDADDR_PROPERTY` when the adapter address is invalid
 - `others/0002`: local change in this repository to enable DSC and allow 60 Hz / 120 Hz switching
-- `others/0003`: adapted from [chiyuki0325/EGoTouchRev-Linux](https://github.com/chiyuki0325/EGoTouchRev-Linux) to add the Himax HX83121A SPI touchscreen driver
+- `himax/0001`: adapted from [chiyuki0325/EGoTouchRev-Linux](https://github.com/chiyuki0325/EGoTouchRev-Linux) (revision `dd96c8e`) to add the restructured Himax HX83121A SPI touchscreen driver
 - `others/0004`: adapted from [TheUnknownThing/linux-gaokun](https://github.com/TheUnknownThing/linux-gaokun) to improve UCSI handling and module wiring for the Type-C path
 - `others/0009`: from the [gaokun-android](https://github.com/vahiru/gaokun-android) port — mainline `sc8280xp.dtsi` has no CPU cooling maps (only a 110 °C critical trip per zone), so the CPUs run flat out until an emergency shutdown; this adds an 85 °C passive trip to each of the eight per-core zones bound to that cluster's cpufreq cooling device. The gap is not specific to this machine, so the patch is written for upstream
 - `dts/` and `defconfig/`: copied into the kernel tree by `scripts/lib/import_local_sources.sh` rather than carried as a patch, so they cannot conflict on a kernel bump

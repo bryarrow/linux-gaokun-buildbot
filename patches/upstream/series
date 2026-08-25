@@ -1,0 +1,12 @@
+0002-arm64-dts-qcom-sc8280xp-Add-memory-region-for-audio-.patch
+0005-arm64-dts-qcom-sc8280xp-add-MDSS-registers-interconn.patch
+0012-platform-arm64-huawei-gaokun-ec-fix-suspend-resume.patch
+0014-drm-msm-dsi-avoid-link-clock-toggles-during-active-v.patch
+0015-power-supply-gaokun-fix-battery-_STA-handling.patch
+0016-platform-arm64-huawei-gaokun-ec-introduce-EC-enable-.patch
+0018-HACK-pinctrl-qcom-sc8280xp-do-not-map-gpio175-to-pdc.patch
+0019-arm64-dts-qcom-sc8208xp-move-dsi1_phy-before-dsi1.patch
+0020-media-hi846-fix-hi846_write_reg_16-handling.patch
+0021-media-hi846-fix-link-frequency-handling.patch
+0022-media-hi846-Add-6MP-and-8MP-modes-support.patch
+0023-media-hi846-fix-modes-handling-for-different-lane-ca.patch

@@ -1,0 +1,5 @@
+0001-Bluetooth-btqca-only-set-USE_BDADDR_PROPERTY-when-ad.patch
+0002-drm-panel-himax-hx83121a-enable-DSC-by-default.patch
+0003-drm-msm-dpu-fix-dsc-timing-width-truncation.patch
+0004-drm-panel-himax-hx83121a-add-backlight-regulator.patch
+0005-platform-arm64-huawei-gaokun-ec-set-wakeup-source-property.patch

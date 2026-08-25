@@ -56,7 +56,7 @@ RPM specs are `packaging/rpm/*.spec.in` templates with `@PLACEHOLDER@` tokens su
 
 ## Architecture notes that span files
 
-**Kernel source assembly** (`20_build_kernel_variants.sh`): `patches/upstream/*` then `patches/others/*` are applied with `git am` to a checkout of `torvalds/linux` at `KERNEL_TAG`, then `scripts/lib/import_local_sources.sh` *copies* `dts/` and `defconfig/` into the tree and commits them. Those two directories are owned outright, not diffed against mainline, so a kernel bump cannot conflict in them — edit the files here, never a patch. The base tree is snapshotted before `patches/el2/*` is applied on top, so the EL2 variant is a second build of the same source with `LOCALVERSION=-gaokun3-el2`.
+**Kernel source assembly** (`20_build_kernel_variants.sh`): `patches/upstream/*`, `patches/others/*`, then `patches/himax/*` are applied with `git am` to a checkout of `torvalds/linux` at `KERNEL_TAG`, each in the order fixed by its `series` file (which must list every `.patch` in the directory exactly once). Then `scripts/lib/import_local_sources.sh` *copies* `dts/` and `defconfig/` into the tree and commits them. Those two directories are owned outright, not diffed against mainline, so a kernel bump cannot conflict in them — edit the files here, never a patch. The base tree is snapshotted before `patches/el2/*` is applied on top, so the EL2 variant is a second build of the same source with `LOCALVERSION=-gaokun3-el2`.
 
 **Boot layout** is BLS via `kernel-install` (`layout=bls`), with systemd-boot on a 1 GiB ESP; nothing boots out of `/boot`. Invariants that several files depend on together:
 

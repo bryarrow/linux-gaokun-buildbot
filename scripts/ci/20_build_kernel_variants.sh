@@ -33,6 +33,36 @@ configure_git_identity() {
   git -C "$repo_dir" config user.email "github-actions[bot]@users.noreply.github.com"
 }
 
+# Apply a patch directory in the order fixed by its series file. The series
+# file must list every .patch in the directory exactly once; a missing,
+# duplicate, or unlisted patch aborts the build before any compilation.
+apply_series() {
+  local kern_src="$1"
+  local patch_dir="$2"
+
+  local series_file="$patch_dir/series"
+  local series_sorted actual_sorted patch
+
+  if [[ ! -f "$series_file" ]]; then
+    echo "error: missing series file: $series_file" >&2
+    exit 1
+  fi
+
+  series_sorted="$(sort "$series_file")"
+  actual_sorted="$(printf '%s\n' "$patch_dir"/*.patch | sed 's|.*/||' | sort)"
+  if [[ "$series_sorted" != "$actual_sorted" ]]; then
+    echo "error: series file out of sync with $patch_dir:" >&2
+    printf '  series: %s\n' "$series_sorted" >&2
+    printf '  files:  %s\n' "$actual_sorted" >&2
+    exit 1
+  fi
+
+  while read -r patch; do
+    [[ -n "$patch" ]] || continue
+    git -C "$kern_src" am "$patch_dir/$patch"
+  done < "$series_file"
+}
+
 build_variant() {
   local src_dir="$1"
   local out_dir="$2"
@@ -65,9 +95,9 @@ snapshot_tree() {
 mkdir -p "$WORKDIR"
 
 configure_git_identity "$KERN_SRC"
-git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/upstream/*.patch
-git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/others/*.patch
-git -C "$KERN_SRC" am "$GAOKUN_DIR"/patches/himax/*.patch
+apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/upstream"
+apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/others"
+apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/himax"
 import_local_sources "$GAOKUN_DIR" "$KERN_SRC"
 
 ccache -z || true
