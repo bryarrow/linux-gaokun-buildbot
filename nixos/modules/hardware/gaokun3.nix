@@ -181,8 +181,8 @@ in {
     # ~/.config/monitors.xml, which takes precedence.
     environment.etc."xdg/monitors.xml".source = ../../../tools/image-assets/etc/xdg/monitors.xml;
 
-    # The skin-temp sensor (thermal_zone11, from pmk8280_adc_tm) and the EC
-    # are known to fail and the machine has sudden power-off history. Log
+    # The EC temp sensor and the per-core tsens zones are known to fail and the
+    # machine has sudden power-off history. Log
     # thermal and power-supply state periodically so crashes can be checked
     # against temperature and charger state afterwards.
     systemd.services.gaokun3-monitor = {
