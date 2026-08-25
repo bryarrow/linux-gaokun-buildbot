@@ -1,0 +1,50 @@
+From d17e5f29e3d93a341c7322b40de78c2aa1953b5e Mon Sep 17 00:00:00 2001
+From: scratch <scratch@local>
+Date: Tue, 25 Aug 2026 20:00:49 +0800
+Subject: [PATCH] platform: arm64: huawei-gaokun-ec: register hwmon as a
+ thermal sensor
+
+Expose the EC temperature channel as a thermal zone provider so the
+board DTS can bind the ec-temp1-thermal zone to it: add the chip
+HWMON_C_REGISTER_TZ attribute to the hwmon info array and document the
+resulting #thermal-sensor-cells = <1> in the binding.
+
+Signed-off-by: gaokun3 port <nekovahiru@gmail.com>
+
+diff --git a/Documentation/devicetree/bindings/embedded-controller/huawei,gaokun3-ec.yaml b/Documentation/devicetree/bindings/embedded-controller/huawei,gaokun3-ec.yaml
+index cd9e65b..63dd0d6 100644
+--- a/Documentation/devicetree/bindings/embedded-controller/huawei,gaokun3-ec.yaml
++++ b/Documentation/devicetree/bindings/embedded-controller/huawei,gaokun3-ec.yaml
+@@ -31,6 +31,9 @@ properties:
+   '#size-cells':
+     const: 0
+ 
++  '#thermal-sensor-cells':
++    const: 1
++
+   interrupts:
+     maxItems: 1
+ 
+@@ -64,6 +67,7 @@ examples:
+ 
+             #address-cells = <1>;
+             #size-cells = <0>;
++            #thermal-sensor-cells = <1>;
+ 
+             connector@0 {
+                 compatible = "usb-c-connector";
+diff --git a/drivers/platform/arm64/huawei-gaokun-ec.c b/drivers/platform/arm64/huawei-gaokun-ec.c
+index e9c4e72..61a900e 100644
+--- a/drivers/platform/arm64/huawei-gaokun-ec.c
++++ b/drivers/platform/arm64/huawei-gaokun-ec.c
+@@ -608,6 +608,7 @@ static const struct hwmon_channel_info gaokun_ec_temp = {
+ };
+ 
+ static const struct hwmon_channel_info * const gaokun_ec_hwmon_info[] = {
++	HWMON_CHANNEL_INFO(chip, HWMON_C_REGISTER_TZ),
+ 	&gaokun_ec_temp,
+ 	NULL
+ };
+-- 
+2.55.0
+
