@@ -1,7 +1,7 @@
 From a69d4e17cfd05956f433d12908b34713af246564 Mon Sep 17 00:00:00 2001
 From: Lewis White <whitelewis@matebook-e-go>
 Date: Tue, 12 May 2026 17:58:36 +0000
-Subject: [PATCH] drm/msm/dpu: fix DSC timing width truncation
+Subject: [PATCH 3/5] drm/msm/dpu: fix DSC timing width truncation
 
 When programming DSI video timing with DSC enabled, derive the compressed
 timing width from dce_bytes_per_line and round it up to the number of
@@ -50,4 +50,3 @@ index ba810f26e..7a8d1136f 100644
  
 -- 
 2.52.0
-
