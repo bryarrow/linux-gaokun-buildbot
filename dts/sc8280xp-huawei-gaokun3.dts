@@ -1412,6 +1412,11 @@
 	status = "okay";
 };
 
+&venus {
+	firmware-name = "qcom/sc8280xp/HUAWEI/gaokun3/qcvss8280.mbn";
+	status = "okay";
+};
+
 &wsamacro {
 	status = "okay";
 };
