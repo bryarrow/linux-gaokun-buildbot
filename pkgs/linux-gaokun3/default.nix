@@ -34,7 +34,7 @@
       sha256 = "sha256-iUkYRaotMYa3RTTrUehSailwLqOYyR+N4soJGQU1la0=";
     };
 
-    patches = patchFiles "upstream" ++ patchFiles "others" ++ patchFiles "himax";
+    patches = patchFiles "upstream" ++ patchFiles "others" ++ patchFiles "himax" ++ patchFiles "media";
 
     postPatch = ''
       cp ${../../dts}/*.dts ${../../dts}/*.dtsi arch/arm64/boot/dts/qcom/
@@ -66,6 +66,19 @@ in
       # (e.g. NVME_AUTH). Skip the common config; structuredExtraConfig and
       # boot.kernelPatches still apply.
       enableCommonConfig = false;
+
+      # v7.2 upstream guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and
+      # the sm8250 tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS,
+      # while nixpkgs' autoModules answers "m" to every tristate question and
+      # would re-enable IRIS, breaking the Venus build. IRIS does not support
+      # sc8280xp; keep it off here explicitly. The Fedora path already
+      # respects "# CONFIG_VIDEO_QCOM_IRIS is not set" in the defconfig.
+      structuredExtraConfig = {
+        VIDEO_QCOM_IRIS = {
+          tristate = "n";
+          optional = true;
+        };
+      };
 
       extraMeta = {
         description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${version}";

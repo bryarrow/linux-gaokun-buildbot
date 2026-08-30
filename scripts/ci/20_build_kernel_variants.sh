@@ -98,6 +98,7 @@ configure_git_identity "$KERN_SRC"
 apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/upstream"
 apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/others"
 apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/himax"
+apply_series "$KERN_SRC" "$GAOKUN_DIR/patches/media"
 import_local_sources "$GAOKUN_DIR" "$KERN_SRC"
 
 ccache -z || true
