@@ -33,6 +33,29 @@ static ssize_t inplace_reset_store(struct device *dev,
 
 static DEVICE_ATTR_WO(inplace_reset);
 
+static ssize_t baseline_full_reset_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct himax_ts_data *ts = dev_get_drvdata(dev);
+	bool do_reset;
+	int ret;
+
+	ret = kstrtobool(buf, &do_reset);
+	if (ret)
+		return ret;
+	if (!do_reset)
+		return count;
+
+	ret = himax_manual_full_baseline_reset(ts);
+	if (ret)
+		return ret;
+	dev_info(ts->dev, "manual full baseline reset completed\n");
+	return count;
+}
+
+static DEVICE_ATTR_WO(baseline_full_reset);
+
 /* ---- sysfs: algo parameter group ---- */
 
 #define HX_ALGO_ATTR_BOOL_RW(_name)					\
@@ -160,6 +183,8 @@ static DEVICE_ATTR_RW(_name)
 
 /* Preprocessing */
 HX_ALGO_ATTR_BOOL_RW(baseline_enabled);
+HX_ALGO_ATTR_BOOL_RW(safe_baseline_replace_enabled);
+HX_ALGO_ATTR_U16_RW(frame_interval_ms, 1, 1000);
 HX_ALGO_ATTR_S16_RW(baseline_noise_deadband, 0, 200);
 HX_ALGO_ATTR_S16_RW(baseline_peak_threshold, 1, 2000);
 HX_ALGO_ATTR_U8_RW(baseline_release_hold_frames, 0, 255);
@@ -177,6 +202,9 @@ HX_ALGO_ATTR_S16_RW(wake_raw_jump_threshold, 1, 4095);
 HX_ALGO_ATTR_U16_RW(wake_max_unstable_nodes, 0, HX_PIXELS);
 HX_ALGO_ATTR_U8_RW(wake_max_unstable_line_nodes, 1, HX_ROWS);
 HX_ALGO_ATTR_U8_RW(safe_commit_no_finger_frames, 1, 240);
+HX_ALGO_ATTR_BOOL_RW(runtime_blreset_enabled);
+HX_ALGO_ATTR_U8_RW(runtime_blreset_confirm_frames, 1, 30);
+HX_ALGO_ATTR_U16_RW(runtime_blreset_cooldown, 0, 3600);
 HX_ALGO_ATTR_S16_RW(runtime_noise_threshold, 1, 8192);
 HX_ALGO_ATTR_U8_RW(runtime_noise_line_nodes, 1, HX_COLS);
 HX_ALGO_ATTR_U16_RW(runtime_noise_total_nodes, 1, HX_PIXELS);
@@ -257,14 +285,56 @@ HX_ALGO_ATTR_U8_RW(euro_alpha_max_q8, 1, 255);
 HX_ALGO_ATTR_U16_RW(euro_speed_threshold, 1, 4096);
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+static const char *hx_safe_compare_result_name(enum hx_safe_compare_result result)
+{
+	switch (result) {
+	case HX_SAFE_COMPARE_WORKING_BETTER:
+		return "WORKING_BETTER";
+	case HX_SAFE_COMPARE_SAFE_BETTER:
+		return "SAFE_BETTER";
+	case HX_SAFE_COMPARE_BOTH_VALID:
+		return "BOTH_VALID";
+	case HX_SAFE_COMPARE_BOTH_INVALID:
+		return "BOTH_INVALID";
+	case HX_SAFE_COMPARE_AMBIGUOUS:
+		return "AMBIGUOUS";
+	case HX_SAFE_COMPARE_NOT_RUN:
+	default:
+		return "NOT_RUN";
+	}
+}
+
 static ssize_t diagnostics_show(struct device *dev,
 				struct device_attribute *attr, char *buf)
 {
 	struct himax_ts_data *ts = dev_get_drvdata(dev);
 	struct hx_algo *a = ts->algo;
+	u32 working_hash = 2166136261U;
+	u32 safe_hash = 2166136261U;
+	s64 baseline_common_sum = 0;
+	s32 baseline_common;
+	u16 baseline_divergent = 0;
 	ssize_t len = 0;
+	int i;
 
 	mutex_lock(&ts->op_lock);
+	for (i = 0; i < HX_PIXELS; i++) {
+		working_hash = (working_hash ^ (u32)a->baseline_q8[i]) *
+			16777619U;
+		safe_hash = (safe_hash ^ (u32)a->safe_baseline_q8[i]) *
+			16777619U;
+		baseline_common_sum += (a->baseline_q8[i] -
+			a->safe_baseline_q8[i]) >> HX_BASELINE_FRACTION_BITS;
+	}
+	baseline_common = (s32)(baseline_common_sum / HX_PIXELS);
+	for (i = 0; i < HX_PIXELS; i++) {
+		s32 local = ((a->baseline_q8[i] -
+			a->safe_baseline_q8[i]) >> HX_BASELINE_FRACTION_BITS) -
+			baseline_common;
+
+		if (abs(local) > HX_BASELINE_CLEAN_LOCAL_THRESHOLD)
+			baseline_divergent++;
+	}
 	len += sysfs_emit_at(buf, len, "frame=%u common=%d max=%d signal=%u ",
 			     a->diag_frame_seq, a->diag_common_diff,
 			     a->diag_frame_max, a->diag_has_signal);
@@ -302,6 +372,303 @@ static ssize_t diagnostics_show(struct device *dev,
 			     "wake_safe_divergences=%u safe_baseline_commits=%u ",
 			     a->wake_safe_divergence_count,
 			     a->baseline_safe_commit_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_finger_mask_accepts=%u wake_finger_mask_rejects=%u ",
+			     a->wake_finger_mask_accept_count,
+			     a->wake_finger_mask_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_finger_degraded_fallbacks=%u ",
+			     a->wake_finger_degraded_fallback_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_raw_finger_inferred=%u wake_raw_finger_releases=%u ",
+			     a->wake_raw_finger_inferred_count,
+			     a->wake_raw_finger_release_count);
+	len += sysfs_emit_at(buf, len,
+			     "wake_ambiguous_fallbacks=%u wake_safe_preserved=%u ",
+			     a->wake_ambiguous_safe_fallback_count,
+			     a->wake_safe_preserved_count);
+	len += sysfs_emit_at(buf, len, "wake_clean_safe_restores=%u ",
+			     a->wake_clean_safe_restore_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_slot=%u safe_slot_score=%u safe_slot_switches=%u safe_slot_rejects=%u safe_replace_wake=%u post_reacquire_hold=%u ",
+			     a->safe_baseline_selected,
+			     a->safe_baseline_selected_score,
+			     a->baseline_safe_slot_switch_count,
+			     a->baseline_safe_slot_reject_count,
+			     a->safe_baseline_replace_enabled,
+			     a->baseline_post_reacquire_hold);
+	len += sysfs_emit_at(buf, len,
+			     "baseline_stage=%u stage_frames=%u frame_interval_ms=%u screen_on_hand_state=%u hw_reset=%u ",
+			     a->baseline_stage, a->baseline_stage_frames,
+			     a->frame_interval_ms,
+			     a->baseline_screen_on_hand_state, a->baseline_hw_reset);
+	len += sysfs_emit_at(buf, len, "normal_baseline_valid=%u ",
+			     a->normal_baseline_valid);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_raw_jump_frames=%u blreset_raw_jump_elapsed_ms=%u blreset_over_noise_frames=%u blrecal_frame=%u blrecal_abnormal=%u blrecal_requested=%u shb_state=%u shb_flags=0x%04x shb_capture_frame=%u ",
+			     a->blreset_raw_jump_frames,
+			     a->blreset_raw_jump_elapsed_ms,
+			     a->blreset_over_noise_frames,
+			     a->blrecal_frame,
+			     a->blrecal_abnormal_count, a->blrecal_requested,
+			     a->shb_state, a->shb_flags, a->shb_capture_frame);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_state=%u blreset_reason=0x%04x blreset_elapsed_ms=%u blreset_triggers=%u blreset_clears=%u ",
+			     a->blreset_state, a->blreset_reason_mask,
+			     a->blreset_reason_elapsed_ms,
+			     a->blreset_trigger_count, a->blreset_clear_count);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_all_touch_abnormal=%u blreset_concurrent_touch=%u ",
+			     a->blreset_all_touch_abnormal,
+			     a->blreset_concurrent_touch);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_baseline_state=%u blreset_baseline_stable=%u blreset_baseline_elapsed_ms=%u blreset_normal_ready=%u blreset_clean_captured=%u ",
+			     a->blreset_baseline_state,
+			     a->blreset_baseline_stable_frames,
+			     a->blreset_baseline_elapsed_ms,
+			     a->blreset_normal_baseline_ready,
+			     a->blreset_clean_baseline_captured);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_wake_abnormal_frames=%u blreset_wake_abnormal_elapsed_ms=%u blreset_wake_triggered=%u blreset_dirty_elapsed_ms=%u blreset_dirty_triggered=%u ",
+			     a->blreset_wake_abnormal_frames,
+			     a->blreset_wake_abnormal_elapsed_ms,
+			     a->blreset_wake_triggered,
+			     a->blreset_dirty_elapsed_ms,
+			     a->blreset_dirty_triggered);
+	len += sysfs_emit_at(buf, len,
+			     "baseline_stage_action=%u stage_updates=%u stage_resets=%u stage_holds=%u stage_forced=%u ",
+			     a->baseline_stage_action,
+#ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
+			     a->baseline_stage_update_count,
+			     a->baseline_stage_reset_action_count,
+			     a->baseline_stage_hold_count,
+			     a->baseline_stage_force_count
+#else
+			     0U, 0U, 0U, 0U
+#endif
+			     );
+	len += sysfs_emit_at(buf, len,
+			     "wake_raw_override=%u wake_raw_release_frames=%u ",
+			     a->wake_raw_finger_override,
+			     a->wake_raw_finger_release_frames);
+	len += sysfs_emit_at(buf, len,
+			     "safe_confirms=%u safe_temporal_rejects=%u ",
+			     a->baseline_safe_confirm_count,
+			     a->baseline_safe_temporal_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_spatial_rejects=%u safe_negative_rejects=%u ",
+			     a->baseline_safe_spatial_reject_count,
+			     a->baseline_safe_negative_reject_count);
+	len += sysfs_emit_at(buf, len, "safe_range_rejects=%u ",
+			     a->baseline_safe_range_reject_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_slots=%u safe_selected=%u safe_confidence=%u screen_epoch=%u ",
+			     a->safe_baseline_count, a->safe_baseline_selected,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+				a->safe_baselines[a->safe_baseline_selected].confidence : 0,
+			     a->screen_epoch);
+	len += sysfs_emit_at(buf, len,
+			     "safe_flags=0x%04x safe_prev_flags=0x%04x queue_head=%u queue_tail=%u queue_count=%u queue_trustable=%u queue_all_valid=%u temp_queue_count=%u ",
+			     a->safe_flags, a->safe_prev_flags, a->safe_queue_head,
+			     a->safe_queue_tail, a->safe_queue_count,
+			     hx_safe_baseline_queue_trustable(a),
+			     hx_safe_baseline_queue_all_valid(a),
+			     a->safe_temp_queue_count);
+	len += sysfs_emit_at(buf, len,
+			     "platform_idle=%u platform_charger_noise=%u platform_charger_connected=%u platform_proximity=%u platform_panel_sd=%u platform_raw_unified=%u platform_cover=%u ",
+			     a->platform.idle_transition, a->platform.charger_noise,
+			     a->platform.charger_connected,
+			     a->platform.proximity_active, a->platform.panel_sd,
+			     a->platform.raw_unified, a->platform.smart_cover);
+	len += sysfs_emit_at(buf, len,
+			     "safe_state=%u safe_reset=%u safe_stable_frames=%u safe_uses=%u ",
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].state :
+			     HX_SAFE_SLOT_EMPTY,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].reset_pending : 0,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].stable_frames : 0,
+			     a->safe_baseline_count &&
+			     a->safe_baseline_selected < HX_SAFE_BASELINE_SLOTS ?
+			     a->safe_baselines[a->safe_baseline_selected].use_count : 0);
+	len += sysfs_emit_at(buf, len,
+			     "safe_deduplications=%u safe_evictions=%u safe_resets=%u safe_side_resets=%u runtime_blresets=%u runtime_blreset_suppressed=%u ",
+			     a->baseline_safe_dedup_count,
+			     a->baseline_safe_eviction_count,
+			     a->baseline_safe_reset_count,
+			     a->baseline_safe_side_reset_count,
+			     a->runtime_blreset_count,
+			     a->runtime_blreset_suppressed_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_abnormal_max=%u safe_abnormal_min=%u safe_current_positive=%u safe_current_negative=%u ",
+			     a->baseline_safe_abnormal_max_count,
+			     a->baseline_safe_abnormal_min_count,
+			     a->safe_current_positive_nodes,
+			     a->safe_current_negative_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_debounce=%u safe_invalid_frames=%u safe_side_sync=%u safe_side_frames=%u safe_signal_stable=%u safe_valid_touches=%u safe_abnormal_touches=%u ",
+			     a->safe_reset_in_debounce,
+			     a->safe_baseline_invalid_frames,
+			     a->safe_sync_reset_side_area,
+			     a->safe_side_reset_frames,
+			     a->safe_signal_stable_frames,
+			     a->safe_valid_touch_count,
+			     a->safe_abnormal_touch_count);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_reason_mask=0x%04x safe_reset_reason_frames=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->safe_reset_reason_mask,
+			     a->safe_reset_reason_frames[0],
+			     a->safe_reset_reason_frames[1],
+			     a->safe_reset_reason_frames[2],
+			     a->safe_reset_reason_frames[3],
+			     a->safe_reset_reason_frames[4],
+			     a->safe_reset_reason_frames[5],
+			     a->safe_reset_reason_frames[6],
+			     a->safe_reset_reason_frames[7],
+			     a->safe_reset_reason_frames[8],
+			     a->safe_reset_reason_frames[9]);
+	len += sysfs_emit_at(buf, len,
+			     "screen_on_frame=%u safe_reset_last_frames=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->screen_on_frame_sequence,
+			     a->safe_reset_reason_last_frame[0],
+			     a->safe_reset_reason_last_frame[1],
+			     a->safe_reset_reason_last_frame[2],
+			     a->safe_reset_reason_last_frame[3],
+			     a->safe_reset_reason_last_frame[4],
+			     a->safe_reset_reason_last_frame[5],
+			     a->safe_reset_reason_last_frame[6],
+			     a->safe_reset_reason_last_frame[7],
+			     a->safe_reset_reason_last_frame[8],
+			     a->safe_reset_reason_last_frame[9]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_pushes=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u safe_reset_triggers=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->safe_reset_push_count[0], a->safe_reset_push_count[1],
+			     a->safe_reset_push_count[2], a->safe_reset_push_count[3],
+			     a->safe_reset_push_count[4], a->safe_reset_push_count[5],
+			     a->safe_reset_push_count[6], a->safe_reset_push_count[7],
+			     a->safe_reset_push_count[8], a->safe_reset_push_count[9],
+			     a->safe_reset_trigger_count[0], a->safe_reset_trigger_count[1],
+			     a->safe_reset_trigger_count[2], a->safe_reset_trigger_count[3],
+			     a->safe_reset_trigger_count[4], a->safe_reset_trigger_count[5],
+			     a->safe_reset_trigger_count[6], a->safe_reset_trigger_count[7],
+			     a->safe_reset_trigger_count[8], a->safe_reset_trigger_count[9]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_push_thresholds=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u safe_reset_time_thresholds=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->safe_reset_push_threshold[0], a->safe_reset_push_threshold[1],
+			     a->safe_reset_push_threshold[2], a->safe_reset_push_threshold[3],
+			     a->safe_reset_push_threshold[4], a->safe_reset_push_threshold[5],
+			     a->safe_reset_push_threshold[6], a->safe_reset_push_threshold[7],
+			     a->safe_reset_push_threshold[8], a->safe_reset_push_threshold[9],
+			     a->safe_reset_time_threshold[0], a->safe_reset_time_threshold[1],
+			     a->safe_reset_time_threshold[2], a->safe_reset_time_threshold[3],
+			     a->safe_reset_time_threshold[4], a->safe_reset_time_threshold[5],
+			     a->safe_reset_time_threshold[6], a->safe_reset_time_threshold[7],
+			     a->safe_reset_time_threshold[8], a->safe_reset_time_threshold[9]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_reset_windows=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->safe_reset_screen_on_window[0],
+			     a->safe_reset_screen_on_window[1],
+			     a->safe_reset_screen_on_window[2],
+			     a->safe_reset_screen_on_window[3],
+			     a->safe_reset_screen_on_window[4],
+			     a->safe_reset_screen_on_window[5],
+			     a->safe_reset_screen_on_window[6],
+			     a->safe_reset_screen_on_window[7],
+			     a->safe_reset_screen_on_window[8],
+			     a->safe_reset_screen_on_window[9]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_baseline_pushes=%u safe_reset_side_mask=0x%04x safe_reset_side_pushes=%u,%u,%u,%u,%u,%u,%u,%u,%u,%u ",
+			     a->safe_baseline_pushes,
+			     a->safe_reset_reason_mask_side,
+			     a->safe_reset_push_count_side[0], a->safe_reset_push_count_side[1],
+			     a->safe_reset_push_count_side[2], a->safe_reset_push_count_side[3],
+			     a->safe_reset_push_count_side[4], a->safe_reset_push_count_side[5],
+			     a->safe_reset_push_count_side[6], a->safe_reset_push_count_side[7],
+			     a->safe_reset_push_count_side[8], a->safe_reset_push_count_side[9]);
+	len += sysfs_emit_at(buf, len,
+			     "blreset_abnormal_types=0x%04x blreset_type_elapsed=%u,%u,%u blreset_type_counts=%u,%u,%u ",
+			     a->blreset_abnormal_type_flags,
+			     a->blreset_abnormal_type_elapsed[0],
+			     a->blreset_abnormal_type_elapsed[1],
+			     a->blreset_abnormal_type_elapsed[2],
+			     a->blreset_type1_count, a->blreset_type2_count,
+			     a->blreset_type3_count);
+	len += sysfs_emit_at(buf, len,
+			     "baseline_touch_hold=%u baseline_touch_seen=%u baseline_touch_release_frames=%u baseline_guard_state=%u baseline_guard_clean_frames=%u baseline_touch_holds=%u baseline_touch_releases=%u baseline_guard_restarts=%u baseline_spatial_updates=%u baseline_spatial_blocks=%u baseline_safe_clamps=%u ",
+			     a->baseline_touch_hold,
+			     a->baseline_touch_seen,
+			     a->baseline_touch_release_frames,
+			     a->baseline_guard_state,
+			     a->baseline_guard_clean_frames,
+			     a->baseline_touch_hold_count,
+			     a->baseline_touch_release_count,
+			     a->baseline_guard_restart_count,
+			     a->baseline_spatial_update_count,
+			     a->baseline_spatial_block_count,
+			     a->baseline_safe_clamp_count);
+	len += sysfs_emit_at(buf, len,
+			     "working_hash=%08x safe_hash=%08x working_safe_common=%d working_safe_divergent=%u ",
+			     working_hash, safe_hash, baseline_common,
+			     baseline_divergent);
+	len += sysfs_emit_at(buf, len,
+			     "safe_compare_result=%s compare_triggers=%u compare_runs=%u ",
+			     hx_safe_compare_result_name(a->diag_safe_compare_result),
+			     a->diag_baseline_compare_triggers,
+			     a->diag_baseline_compare_runs);
+	len += sysfs_emit_at(buf, len,
+			     "working_bad_nodes=%u safe_bad_nodes=%u ",
+			     a->diag_working_bad_nodes,
+			     a->diag_safe_bad_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_negative_nodes=%u safe_negative_nodes=%u ",
+			     a->diag_working_negative_nodes,
+			     a->diag_safe_negative_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_line_noise=%u safe_line_noise=%u ",
+			     a->diag_working_line_noise,
+			     a->diag_safe_line_noise);
+	len += sysfs_emit_at(buf, len,
+			     "working_common_shift=%d safe_common_shift=%d ",
+			     a->diag_working_common_shift,
+			     a->diag_safe_common_shift);
+	len += sysfs_emit_at(buf, len,
+			     "working_max_positive=%d working_max_negative=%d ",
+			     a->diag_working_max_positive,
+			     a->diag_working_max_negative);
+	len += sysfs_emit_at(buf, len,
+			     "safe_max_positive=%d safe_max_negative=%d ",
+			     a->diag_safe_max_positive,
+			     a->diag_safe_max_negative);
+	len += sysfs_emit_at(buf, len,
+			     "touch_mask_nodes=%u working_masked_bad=%u safe_masked_bad=%u ",
+			     a->diag_touch_mask_nodes,
+			     a->diag_working_masked_bad_nodes,
+			     a->diag_safe_masked_bad_nodes);
+	len += sysfs_emit_at(buf, len,
+			     "working_regions=%u,%u,%u,%u,%u safe_regions=%u,%u,%u,%u,%u ",
+			     a->diag_working_region_bad[0],
+			     a->diag_working_region_bad[1],
+			     a->diag_working_region_bad[2],
+			     a->diag_working_region_bad[3],
+			     a->diag_working_region_bad[4],
+			     a->diag_safe_region_bad[0],
+			     a->diag_safe_region_bad[1],
+			     a->diag_safe_region_bad[2],
+			     a->diag_safe_region_bad[3],
+			     a->diag_safe_region_bad[4]);
+	len += sysfs_emit_at(buf, len,
+			     "safe_improvement_frames=%u safe_regression_frames=%u ",
+			     a->diag_safe_improvement_frames,
+			     a->diag_safe_regression_frames);
+	len += sysfs_emit_at(buf, len,
+			     "runtime_blreset_recommended=%u blreset_recommendations=%u ",
+			     a->diag_blreset_recommended,
+			     a->diag_blreset_recommendation_count);
 	len += sysfs_emit_at(buf, len,
 			     "noise_frame_holds=%u small_peak_continued=%u ",
 			     a->noise_frame_hold_count,
@@ -544,6 +911,8 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_event_stack_hex.attr,
 #endif
 	&dev_attr_baseline_enabled.attr,
+	&dev_attr_safe_baseline_replace_enabled.attr,
+	&dev_attr_frame_interval_ms.attr,
 	&dev_attr_baseline_noise_deadband.attr,
 	&dev_attr_baseline_peak_threshold.attr,
 	&dev_attr_baseline_release_hold_frames.attr,
@@ -561,6 +930,9 @@ static struct attribute *hx_algo_attrs[] = {
 	&dev_attr_wake_max_unstable_nodes.attr,
 	&dev_attr_wake_max_unstable_line_nodes.attr,
 	&dev_attr_safe_commit_no_finger_frames.attr,
+	&dev_attr_runtime_blreset_enabled.attr,
+	&dev_attr_runtime_blreset_confirm_frames.attr,
+	&dev_attr_runtime_blreset_cooldown.attr,
 	&dev_attr_runtime_noise_threshold.attr,
 	&dev_attr_runtime_noise_line_nodes.attr,
 	&dev_attr_runtime_noise_total_nodes.attr,
@@ -650,11 +1022,14 @@ int himax_sysfs_init(struct himax_ts_data *ts)
 	ret = device_create_file(ts->dev, &dev_attr_inplace_reset);
 	if (ret)
 		return ret;
+	ret = device_create_file(ts->dev, &dev_attr_baseline_full_reset);
+	if (ret)
+		goto remove_inplace_reset;
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	ret = sysfs_create_bin_file(&ts->dev->kobj, &event_stack_attr);
 	if (ret)
-		goto remove_reset;
+		goto remove_full_reset;
 	ret = sysfs_create_bin_file(&ts->dev->kobj, &event_trace_attr);
 	if (ret)
 		goto remove_event_stack;
@@ -663,13 +1038,16 @@ int himax_sysfs_init(struct himax_ts_data *ts)
 	ret = devm_device_add_group(ts->dev, &hx_algo_attr_group);
 	if (!ret)
 		return 0;
+	goto remove_full_reset;
 
 #ifdef CONFIG_TOUCHSCREEN_HIMAX_HX83121A_DIAGNOSTICS
 	sysfs_remove_bin_file(&ts->dev->kobj, &event_trace_attr);
 remove_event_stack:
 	sysfs_remove_bin_file(&ts->dev->kobj, &event_stack_attr);
-remove_reset:
 #endif
+remove_full_reset:
+	device_remove_file(ts->dev, &dev_attr_baseline_full_reset);
+remove_inplace_reset:
 	device_remove_file(ts->dev, &dev_attr_inplace_reset);
 	return ret;
 }
@@ -681,4 +1059,5 @@ void himax_sysfs_remove(struct himax_ts_data *ts)
 	sysfs_remove_bin_file(&ts->dev->kobj, &event_stack_attr);
 #endif
 	device_remove_file(ts->dev, &dev_attr_inplace_reset);
+	device_remove_file(ts->dev, &dev_attr_baseline_full_reset);
 }
