@@ -50,6 +50,7 @@ Installing or upgrading a kernel package refreshes the initramfs and the boot en
 - `himax/0001`: adapted from [chiyuki0325/EGoTouchRev-Linux](https://github.com/chiyuki0325/EGoTouchRev-Linux) (revision `e738049`) to add the restructured Himax HX83121A SPI touchscreen driver
 - `others/0004`: adapted from [TheUnknownThing/linux-gaokun](https://github.com/TheUnknownThing/linux-gaokun) to improve UCSI handling and module wiring for the Type-C path
 - `others/0006`: from the [gaokun-android](https://github.com/vahiru/gaokun-android) port — mainline `sc8280xp.dtsi` has no CPU cooling maps (only a 110 °C critical trip per zone), so the CPUs run flat out until an emergency shutdown; this adds a 75 °C passive trip to each of the eight per-core zones bound to that cluster's cpufreq cooling device. The gap is not specific to this machine, so the patch is written for upstream
+- `media/*`: from the [gaokun-android-kernel](https://github.com/pgs666/gaokun-android-kernel) port of the right-0903/linux-gaokun Venus series to enable the SC8280XP Venus hardware video codec (driver resources, dt-bindings, `videocc` and `video-codec` DT nodes). The gaokun3 board enablement — the `firmware-name` pointing at the already packaged `qcvss8280.mbn` and `status = "okay"` — lives in `dts/` instead of the patch
 - `dts/` and `defconfig/`: copied into the kernel tree by `scripts/lib/import_local_sources.sh` rather than carried as a patch, so they cannot conflict on a kernel bump
 - **[Optional]** `el2/*`: adapted from [TravMurav/linux](https://github.com/TravMurav/linux/tree/x13s-6.18-v1.1-cxsd) for the EL2 boot path, including SMP2P handover, remoteproc attach/restart flow, SCM/SHM owner handling, and related rpmsg/QRTR/pmic_glink stability fixes
 
@@ -134,6 +135,8 @@ pick between them for you:
 ## Feature Support
 
 For an overview of hardware support status on the device, see [right-0903/linux-gaokun `## Feature Support`](https://github.com/right-0903/linux-gaokun?tab=readme-ov-file#feature-support).
+
+In addition, this repository enables the SC8280XP Venus hardware video codec (H.264/HEVC/VP9 encode and decode) via the `media/` patch series and the `CONFIG_VIDEO_QCOM_VENUS=m` module.
 
 ## References
 
