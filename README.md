@@ -87,10 +87,7 @@ audio UCM — behind one option:
 
 ```nix
 {
-  inputs.gaokun3 = {
-    url = "github:KawaiiHachimi/linux-gaokun-buildbot";
-    inputs.nixpkgs.follows = "nixpkgs";
-  };
+  inputs.gaokun3.url = "github:KawaiiHachimi/linux-gaokun-buildbot";
   outputs = { nixpkgs, gaokun3, ... }: {
     nixosConfigurations.ego = nixpkgs.lib.nixosSystem {
       system = "aarch64-linux";
@@ -107,6 +104,12 @@ Use `boot.loader.systemd-boot.enable = true`, which is what the device tree
 support is tested with. The kernel targets aarch64; on an x86_64 builder the
 flake's packages are cross-compiled. This NixOS support replaces the Fedora
 image pipeline with a NixOS install; the two are independent.
+
+Do **not** add `inputs.gaokun3.inputs.nixpkgs.follows = "nixpkgs"`. The kernel,
+firmware and tools are built from this repository's own pinned nixpkgs, which is
+what makes them the same derivation — and therefore the same binary-cache entry
+— for everyone. Making them follow your nixpkgs rebuilds them locally against
+it, so the cache no longer matches. Your system's own nixpkgs is unaffected.
 
 The model firmware is redistributable but not modifiable, so evaluation refuses
 it under a stock `nixpkgs.config.allowUnfree = false`; allow it explicitly:

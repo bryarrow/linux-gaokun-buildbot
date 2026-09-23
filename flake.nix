@@ -47,6 +47,20 @@
           config.allowUnfreePredicate = allowUnfreePredicate;
         };
   in {
+    # The overlay exposes this flake's own builds rather than packages rebuilt
+    # with the consumer's nixpkgs. A stock kernel is the same derivation for
+    # everyone on one nixpkgs revision, which is why cache.nixos.org works; a
+    # third-party kernel loses that as soon as it is rebuilt against each
+    # consumer's nixpkgs. Pinning it to the flake's nixpkgs restores the
+    # property: the derivation, and so the cache entry, is fixed by this
+    # repository's commit for every consumer.
+    overlays.default = final: prev: {
+      linux-gaokun3 = self.packages.${prev.system}.linux-gaokun3;
+      linuxPackages_gaokun3 = prev.linuxPackagesFor final.linux-gaokun3;
+      linux-firmware-gaokun3 = self.packages.${prev.system}.firmware-gaokun3;
+      gaokun3-tools = self.packages.${prev.system}.tools-gaokun3;
+    };
+
     packages = forAllSystems (system: {
       linux-gaokun3 = (kernelPkgsFor system).callPackage ./pkgs/linux-gaokun3 {};
       firmware-gaokun3 = (pkgsFor system).callPackage ./pkgs/firmware-gaokun3 {};
@@ -61,7 +75,13 @@
       });
 
     nixosModules = {
-      gaokun3 = import ./nixos/modules/hardware/gaokun3.nix;
+      # The module consumes pkgs.linux-gaokun3 and friends, so the overlay has
+      # to be applied for it to evaluate at all. Doing that here keeps
+      # `hardware.gaokun3.enable = true` the only line a user writes.
+      gaokun3 = { ... }: {
+        imports = [ ./nixos/modules/hardware/gaokun3.nix ];
+        nixpkgs.overlays = [ self.overlays.default ];
+      };
       default = self.nixosModules.gaokun3;
     };
   };

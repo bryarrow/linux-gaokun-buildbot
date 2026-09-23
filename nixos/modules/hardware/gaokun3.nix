@@ -6,9 +6,12 @@
 }: let
   cfg = config.hardware.gaokun3;
 
-  kernel = pkgs.callPackage ../../../pkgs/linux-gaokun3 {};
-  firmware = pkgs.callPackage ../../../pkgs/firmware-gaokun3 {};
-  tools = pkgs.callPackage ../../../pkgs/tools-gaokun3 {};
+  # These names come from the flake's overlay, which points at the packages
+  # this repository builds with its own pinned nixpkgs rather than at copies
+  # rebuilt with the consumer's. That is what keeps the kernel's derivation —
+  # and so its binary cache entry — identical for every consumer.
+  firmware = pkgs.linux-firmware-gaokun3;
+  tools = pkgs.gaokun3-tools;
 
   # The Fedora image installs its sc8280xp.conf over the one from
   # alsa-ucm-conf. NixOS finds UCM2 files at $ALSA_CONFIG_UCM2 (alsa-lib reads
@@ -82,15 +85,15 @@ in {
 
     kernelPackages = lib.mkOption {
       type = lib.types.unspecified;
-      default = pkgs.linuxPackagesFor kernel;
-      defaultText = lib.literalExpression "pkgs.linuxPackagesFor (callPackage ../../../pkgs/linux-gaokun3 { })";
+      default = pkgs.linuxPackages_gaokun3;
+      defaultText = lib.literalExpression "pkgs.linuxPackages_gaokun3";
       description = "The gaokun3 kernel package set to boot with.";
     };
 
     firmware = lib.mkOption {
       type = lib.types.listOf lib.types.package;
-      default = [firmware];
-      defaultText = lib.literalExpression "[ firmware-gaokun3 ]";
+      default = [pkgs.linux-firmware-gaokun3];
+      defaultText = lib.literalExpression "[ pkgs.linux-firmware-gaokun3 ]";
       description = ''
         Model-specific firmware packages, merged ahead of linux-firmware so the
         same name resolves to the gaokun3 copy.
