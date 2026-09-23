@@ -117,6 +117,41 @@ it under a stock `nixpkgs.config.allowUnfree = false`; allow it explicitly:
   ]; }
 ```
 
+### Binary cache
+
+The project publishes its kernel and firmware builds to a public Cachix cache,
+so a rebuild downloads them instead of compiling the kernel on the device.
+`hardware.gaokun3.enable = true` wires it up for you
+(`hardware.gaokun3.binaryCache.enable`, on by default). Everything still works
+without it; the kernel is just built locally.
+
+Trusting a cache key applies to every build on the machine, not only gaokun3's,
+so there is a switch:
+
+```nix
+{ hardware.gaokun3.binaryCache.enable = false; }
+```
+
+If you would rather configure Nix yourself, the equivalent is:
+
+```ini
+# /etc/nix/nix.conf, or run `cachix use gaokun3`
+extra-substituters = https://gaokun3.cachix.org
+extra-trusted-public-keys = gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAMJr7ibBxJtIsI=
+```
+
+A flake that takes this repository as an input does not inherit its
+`nixConfig` — Nix only honours that from the top-level flake — so use the
+snippet above or the module option. When you build the flake directly, as in
+`nix build github:KawaiiHachimi/linux-gaokun-buildbot`, its `nixConfig` does
+apply, but Nix asks for `--accept-flake-config` unless you are a trusted user.
+
+The cache is on Cachix's free open-source tier: 5 GB, with least-recently-used
+entries evicted once it is full. Kernel paths for older versions can therefore
+disappear, and a rebuild of one of those compiles locally instead. Nothing
+breaks, it just takes longer. The kernel's `-dev` output, which carries the
+whole source tree, is excluded from uploads for the same reason.
+
 ### Language and input
 
 The image ships `LANG=en_US.UTF-8` and no input method, matching the reference

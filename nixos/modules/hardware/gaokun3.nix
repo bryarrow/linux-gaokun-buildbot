@@ -96,6 +96,23 @@ in {
         same name resolves to the gaokun3 copy.
       '';
     };
+
+    binaryCache = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = ''
+          Use the project's Cachix cache as a substituter and trust its signing
+          key, so the gaokun3 kernel is downloaded instead of compiled locally.
+
+          Trusting a public key applies to every build on this machine, not
+          only gaokun3's, which is why this is a switch. Turning it off leaves
+          the system's substituter configuration untouched: the build still
+          works, it just compiles the kernel here. See the README for the
+          equivalent `nix.conf` and flake snippets.
+        '';
+      };
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -114,6 +131,14 @@ in {
     hardware.firmware = cfg.firmware;
 
     hardware.bluetooth.enable = lib.mkDefault true;
+
+    # The project's own cache, separate from any personal one, because its
+    # beneficiaries are all gaokun3 owners and its kernel paths are long-lived
+    # assets that should not be evicted with a system configuration.
+    nix.settings = lib.mkIf cfg.binaryCache.enable {
+      extra-substituters = ["https://gaokun3.cachix.org"];
+      extra-trusted-public-keys = ["gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAMJr7ibBxJtIsI="];
+    };
 
     # The defconfig is an independent distribution kernel policy (the Fedora
     # build applies nothing on top of it), so several modules in NixOS's

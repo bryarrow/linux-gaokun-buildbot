@@ -88,4 +88,12 @@ in {
     pkgs.runCommand "gaokun3-eval" {} ''
       echo ${toplevel} > $out
     '';
+
+  # Building this forces every package output, which is the point: a push to
+  # main builds the kernel here and cachix-action pushes it to the cache. It is
+  # far too expensive for a pull request, which is why CI only evaluates there.
+  # The cross-compiled x86_64 packages are deliberately not part of it.
+  packages = pkgs.linkFarm "gaokun3-packages" (
+    lib.mapAttrsToList (name: path: {inherit name path;}) self.packages.${system}
+  );
 }
