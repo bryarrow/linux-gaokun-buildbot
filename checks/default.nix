@@ -89,11 +89,20 @@ in {
       echo ${toplevel} > $out
     '';
 
-  # Building this forces every package output, which is the point: a push to
-  # main builds the kernel here and cachix-action pushes it to the cache. It is
-  # far too expensive for a pull request, which is why CI only evaluates there.
-  # The cross-compiled x86_64 packages are deliberately not part of it.
-  packages = pkgs.linkFarm "gaokun3-packages" (
-    lib.mapAttrsToList (name: path: {inherit name path;}) self.packages.${system}
-  );
+  # Building this forces every package, and the kernel's `modules` output
+  # explicitly. A linkFarm only realises each package's default output, so `out`
+  # would be cached while `modules` — which the system closure and the initrd
+  # need — was not, and a device would still compile the kernel to get it. The
+  # `dev` output comes out of the same build but the workflow's pushFilter keeps
+  # it out of the cache. A push to main builds this and cachix-action's daemon
+  # pushes the store paths; pull requests only evaluate, which is why the
+  # expensive part lives here rather than in evaluation. The cross-compiled
+  # x86_64 packages are deliberately not part of it.
+  packages = let
+    kernel = self.packages.${system}.linux-gaokun3;
+  in
+    pkgs.linkFarm "gaokun3-packages" (
+      lib.mapAttrsToList (name: path: {inherit name path;}) self.packages.${system}
+      ++ [{name = "linux-gaokun3-modules"; path = kernel.modules;}]
+    );
 }
