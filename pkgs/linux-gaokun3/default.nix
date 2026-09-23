@@ -1,70 +1,72 @@
 {
   lib,
-  stdenv,
   buildLinux,
   fetchurl,
+  applyPatches,
   # NixOS's boot.kernelPackages apply function overrides the kernel with these
   # (randstruct seed, boot.kernelPatches, feature set). They must not be named
   # parameters: callPackage would inject pkgs.kernelPatches (the patch-set
   # attrset, not a list) into the first one. Catch them via the argset and
-  # forward explicitly instead.
+  # merge explicitly instead.
   ...
 }@args: let
-  version = "7.2.0";
+  pins = import ../../nix/pins.nix;
+  series = import ../../nix/lib/patch-series.nix {inherit lib;};
 
-  # The patch series is git format-patch output; mkDerivation applies them with
-  # `patch -p1` in list order, the same content `git am` applies on the CI side.
-  # Each directory also carries a `series` file that is not a patch itself.
-  patchFiles = dir:
-    builtins.map (n: "${../../patches}/${dir}/${n}") (
-      builtins.filter (n: n != "series") (
-        builtins.sort builtins.lessThan (builtins.attrNames (builtins.readDir ../../patches/${dir}))
-      )
-    );
+  # Order comes from each directory's series file and nowhere else. The base
+  # series is prepended to whatever the caller passes through
+  # boot.kernelPatches, so appending a patch cannot displace ours.
+  basePatches =
+    series "upstream"
+    ++ series "others"
+    ++ series "himax"
+    ++ series "media";
 
-  # dts/ and defconfig/ are owned outright by this repository (not diffs against
-  # mainline), so they are copied into the tree instead of carried as patches —
-  # see scripts/lib/import_local_sources.sh.
-  src = stdenv.mkDerivation {
-    pname = "linux-gaokun3-src";
-    inherit version;
+  # dts/ and defconfig/ are owned outright by this repository (not diffs
+  # against mainline), so they are copied into the tree instead of carried as
+  # patches — see scripts/lib/import_local_sources.sh.
+  #
+  # The copy has to happen on `src`, not on a postPatch handed to buildLinux:
+  # generic.nix builds its configfile derivation with
+  # `postPatch = kernel.postPatch + …`, where kernel.postPatch is build.nix's
+  # own string. A postPatch passed to buildLinux is neither a parameter nor
+  # forwarded, so it would be silently dropped and gaokun3_defconfig would not
+  # exist when the config is generated. applyPatches runs its postPatch before
+  # both derivations inherit this src, which is what makes the defconfig
+  # visible at configuration time.
+  src = applyPatches {
+    name = "linux-${pins.kernelVersion}-gaokun3-source";
 
     src = fetchurl {
-      url = "https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/snapshot/v7.2.tar.gz";
-      sha256 = "sha256-iUkYRaotMYa3RTTrUehSailwLqOYyR+N4soJGQU1la0=";
+      url = pins.kernelTarballUrl;
+      hash = pins.kernelHash;
     };
-
-    patches = patchFiles "upstream" ++ patchFiles "others" ++ patchFiles "himax" ++ patchFiles "media";
 
     postPatch = ''
       cp ${../../dts}/*.dts ${../../dts}/*.dtsi arch/arm64/boot/dts/qcom/
       cp ${../../defconfig}/gaokun3_defconfig arch/arm64/configs/
-    '';
-
-    dontConfigure = true;
-    dontBuild = true;
-
-    installPhase = ''
-      runHook preInstall
-      mkdir -p $out
-      cp -a . $out/
-      runHook postInstall
     '';
   };
 in
   buildLinux (
     {
       pname = "linux-gaokun3";
-      inherit version src;
+      version = pins.kernelVersion;
+      inherit src;
+
+      # kernelPatches entries carry the series files' order; stdenv applies
+      # them with `patch -p1`, the same content `git am` applies on the CI side.
+      kernelPatches = basePatches ++ (args.kernelPatches or []);
 
       # kernel.release is "7.2.0" + CONFIG_LOCALVERSION="-gaokun3".
-      modDirVersion = "${version}-gaokun3";
+      modDirVersion = "${pins.kernelVersion}-gaokun3";
       defconfig = "gaokun3_defconfig";
       # gaokun3_defconfig is an independent distribution kernel policy (the
       # Fedora build applies nothing on top of it), and nixpkgs' common-config
       # demands values for several symbols this defconfig sets differently
       # (e.g. NVME_AUTH). Skip the common config; structuredExtraConfig and
-      # boot.kernelPatches still apply.
+      # boot.kernelPatches still apply. Converging on nixpkgs' aarch64 config
+      # plus a reviewed delta is a separate, hardware-verified change.
       enableCommonConfig = false;
 
       # v7.2 upstream guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and
@@ -81,12 +83,11 @@ in
       };
 
       extraMeta = {
-        description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${version}";
+        description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${pins.kernelVersion}";
         homepage = "https://github.com/KawaiiHachimi/linux-gaokun-buildbot";
         platforms = lib.platforms.aarch64;
       };
     }
-    // (lib.optionalAttrs (args ? kernelPatches) {inherit (args) kernelPatches;})
     // (lib.optionalAttrs (args ? randstructSeed) {inherit (args) randstructSeed;})
     // (lib.optionalAttrs (args ? features) {inherit (args) features;})
   )
