@@ -132,12 +132,19 @@ in {
       extra-trusted-public-keys = ["gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAMJr7ibBxJtIsI="];
     };
 
-    # P3 turned on nixpkgs' common config, which provides the SATA/USB/HID and
-    # TPM modules NixOS' default initrd list asks for, so that list is no longer
-    # suppressed. USB_PCI is re-enabled in nix/config/gaokun3-extra.nix because
+    # P3 turned on nixpkgs' common config, which provides the SATA, USB and HID
+    # modules NixOS' default initrd list asks for, so that list is no longer
+    # suppressed; USB_PCI is re-enabled in nix/config/gaokun3-extra.nix because
     # ehci_pci/ohci_pci/xhci_pci only exist with it.
     boot.initrd.availableKernelModules = initrdModules;
     boot.kernelModules = bootModules;
+    # The systemd initrd's TPM2 support adds tpm-tis and tpm-crb
+    # (nixos/modules/system/boot/systemd/tpm2.nix). This machine boots from the
+    # device tree, so CONFIG_ACPI is off and TCG_CRB is never built -- only
+    # tpm-tis/tpm_ftpm_tee exist -- and the modules-closure would fail on
+    # tpm-crb. The NVMe root needs no initrd TPM. This stays even though the
+    # common config is on; it is not one of the compensations P3 removed.
+    boot.initrd.systemd.tpm2.enable = false;
     # ath11k's probe synchronously request_module()s the QRTR family
     # (net-pf-42) from an async workqueue while qrtr.ko depends on ath11k and
     # mhi. When qrtr is not already loaded the modprobe chain can wedge the
