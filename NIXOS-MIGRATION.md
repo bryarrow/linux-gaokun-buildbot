@@ -668,7 +668,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 | P0 供应链与不变量 | 已完成，逐项验证 | `9013b9a1` |
 | P1 CI 与二进制缓存 | 代码已完成（`9bfa8883` 补上内核 `modules` 输出）；用户侧待办见 11.4 | `db75b4fa` |
 | P2 包与模块架构 | 已完成（overlay、alsa 包、`pkgs.*`、`mkBefore`、meta、`packages.default`） | `f9fc6b28` |
-| P3 内核配置收敛 | 代码已完成，待实机冷启动验证（见 11.2 第 13、14 条） | `da1d7b36` |
+| P3 内核配置收敛 | 代码已完成（基底已换成内核 `defconfig`，第 24 条），待实机冷启动验证 | `da1d7b36`、`3844f77b`、`1f970437` |
 | P4 EL2 变体 | 未开始 | — |
 | P5 文档与叙事反写 | 未开始 | — |
 | P6 NixOS 安装介质 | 未开始（Fedora 能否退役的前提） | — |
@@ -720,7 +720,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     是 GPL-2.0，而 `chiyuki0325/EGoTouchRev-Linux` 没有 license 文件（GitHub license API 404），
     组合作品没有任何单一 SPDX 标识成立。`meta.license` 本就是可选的，因此去掉字段、只留注释，
     等维护者裁定。
-13. **P3 的基底暂时仍是 `gaokun3_defconfig`。** 设计 §5.4 的终点是 `defconfig = "defconfig"`
+13. **（已由第 24 条取代）P3 的基底暂时仍是 `gaokun3_defconfig`。** 设计 §5.4 的终点是 `defconfig = "defconfig"`
     加一份经审查的 Gaokun 片段。把 defconfig 与 nixpkgs `common-config.nix` 的**显式**符号集
     比对后，真正"两边都设了但值不同"的只有 12 个（LSM order、preemption、tracing、驱动家族
     这些并不是冲突，只是 common config 不设，会自动继承 nixpkgs/autoModules 的缺省）。
@@ -730,7 +730,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 14. **覆盖 common config 需要显式优先级。** `common-config.nix` 的选项是优先级 100 的普通
     定义，同优先级的第二个定义会直接报冲突（`CMA_SIZE_MBYTES` 实测）。`nix/config/gaokun3-extra.nix`
     用 `lib.mkOverride 90` 覆盖，并保留 `mkForce`(50) 给用户——与 `zen-kernels.nix` 同一惯例。
-15. **P3 首次 CI 失败于 configfile，需要 `ignoreConfigErrors`。** `generate-config.pl` 在
+15. **（定性已由第 24、25 条取代，`ignoreConfigErrors` 已删除）P3 首次 CI 失败于 configfile，需要 `ignoreConfigErrors`。** `generate-config.pl` 在
     aarch64 上把"common config 设了但用不上"的选项当致命错误，7.2.0 下有 27 个：多数是别的
     平台的驱动，其父 menu 被 gaokun3_defconfig 关掉（`RTW88`、`ROCKCHIP_*`、`SUN8I_*`……），
     外加 `IMA`、以及 `NVME_AUTH`（common 要 `m`、基底是 `y`）。**`IMA` 不是"别的平台的驱动"**：
@@ -745,6 +745,8 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     依据是**现行内核实测**：`/run/current-system/kernel`（P3 前的 `w674i7r…`）的 modules 里有
     `tpm_tis.ko`/`tpm_ftpm_tee.ko`、没有 `tpm_crb.ko`；不是 P3 的实机验证（尚无该 generation）。
     P3 真正删掉的只有 `includeDefaultModules = false`。
+    （第 25 条更新：基底换成内核 `defconfig` 后 `CONFIG_ACPI=y`、`TCG_CRB=m`，"`tpm-crb` 从不
+    构建"这个前提已经变了。这行仍然保留，但它的作用收窄成"initrd 里不放 TPM"，见 11.4 第 9 条。）
 17. **删掉 defconfig 的 `CONFIG_LSM`。** 该串里写的 `integrity` 在 7.2 已不是 LSM，且非默认
     `CONFIG_LSM` 会覆盖 `DEFAULT_SECURITY_*`，所以旧的那行既过时又让默认选择失效。改用内核默认：
     实测得到 `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
@@ -783,6 +785,40 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     而 `hardware.firmware` 在 ≥5.19 上压缩成 `.zst`，脚本 `cp` 的 `wcnhpnv21g.bin` 根本不存在。
     修法：条件移到 `unitConfig`，脚本按实际存在的 `.bin`/`.bin.zst` 取源，`.zst` 用 `zstd -d`
     解压到可写目录再 patch，`path` 加上 `pkgs.zstd`。
+24. **P3 的基底已换成内核自己的 `defconfig`（第 13 条的终点，`1f970437`）。** 改动三处：
+    `pkgs/linux-gaokun3/default.nix` 的 `defconfig = "defconfig"`；
+    `nix/config/gaokun3-extra.nix` 收敛到 8 条（`LOCALVERSION`、`BT_LE`、`INTEGRITY`、`IMA`、
+    `TCG_TPM`、`CMA_SIZE_MBYTES`、`USB_PCI`、`VIDEO_QCOM_IRIS`）；`checks.config-symbols` 按新
+    delta 重排。`defconfig/gaokun3_defconfig` 仍拷进内核树并继续驱动 Fedora 流水线，只是 Nix
+    内核不再选它。**同片段下**与旧基底逐符号比对：4288 行取值不同、2893 个符号只在 nixpkgs 侧、
+    155 个只在旧侧；旧配置 `=y`/`=m` 而新配置不再启用的有 195 个，逐个看全是别的平台的网卡
+    （Starfire、NetXen、QLCNIC、SFC、TEHUTI……）、PCMCIA、`DVB_NET`，加上
+    `ARM64_VA_BITS_48`/`PA_BITS_48`（换成 52 位）、`SECURITY_SELINUX*`、`NETFILTER_*_LEGACY`、
+    `SYSFS_SYSCALL` 这类策略项。**没有本机用到的驱动消失**：`DRM_MSM`、`ATH11K(_PCI)`、
+    `BT_QCA`、`SND_SOC_SC8280XP`、`EC_HUAWEI_GAOKUN`、`UCSI_HUAWEI_GAOKUN`、
+    `TOUCHSCREEN_HIMAX_HX83121A_SPI`、`SCSI_UFS_QCOM` 等仍是 `m`/`y`。采纳 nixpkgs 的三项
+    副作用要记住：`ARM64_VA_BITS=52`（连带 `PA_BITS=52`）、SELinux 关闭（nixpkgs 的 arm64
+    defconfig 不设 `SECURITY_SELINUX`，common config 只设 `SECURITY_APPARMOR`；NixOS 本来也不
+    开 SELinux）、ACPI 打开（第 25 条）。`ignoreConfigErrors = true` 随之删除：
+    `generate-config.pl` 的致命检查恢复，第 15 条那 27 条现在只剩 `IMA` 一条需要处理。
+25. **ACPI 随基底打开了，但运行期仍是设备树；`ignoreConfigErrors` 换成一条窄的 `optional`。**
+    两件事都是第 24 条的直接后果：
+    1. `TCG_CRB=m` 出现（内核自己的 arm64 `defconfig` 有 `CONFIG_ACPI=y`，而
+       `gaokun3_defconfig` 没有这一行、arm64 上 ACPI 的 Kconfig 默认是 n），把
+       `checks.config-symbols` 里"TCG_CRB 不应被构建"那条断言打红——这条 check 因此换成注释。
+       判定**不必把 ACPI 关回去**：`arch/arm64/kernel/acpi.c:198` 的规则是"只有设备树是 stub
+       时才启用 ACPI"，`dt_is_stub()`（同文件 71 行）除 `/chosen` 与 Xen 的 `/hypervisor`
+       外只要还有任何一个顶层节点就返回 false；本机由 BLS 条目传入完整 gaokun3 DTB，cmdline
+       里也没有 `acpi=on|force`，因此 `acpi_disabled` 在驱动初始化前就置位，`tpm_crb` 只是编
+       进来、不会绑定。真正的守卫仍是 `TCG_TPM=m`（第 22 条）。
+    2. `IMA = yes` 是 common config 里**没有**标 `optional` 的策略项，而 `INTEGRITY=n` 让 IMA
+       不可见，`generate-config.pl` 因此把它当致命错误（`optional` 的合并规则是"mandatory 胜"，
+       `kernel_config.nix` 的 `mergeFalseByDefault`）。修法是在片段里用 `hardwareOverride`
+       （90 < common config 的 100，整条定义替换掉它的）重述 nixpkgs 的值并只加
+       `optional = true`：既不改值，也只放过这一条。第 15 条的 `ignoreConfigErrors` 是全局
+       开关，实测正是它把 `TCG_TPM (wanted 'm', got 'y')` 压成 warning、让 90 秒那次回归
+       上了设备，因此不再使用。`checks.config-symbols` 增加"`IMA` 不得被构建"作为对这条放宽
+       的负向断言。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -824,6 +860,29 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
   （`CMA_SIZE_MBYTES=128`、`USB_PCI=y`、IRIS 未设）不变。
 - 新增的 `checks.config-symbols` 与 priority-aware 的 `checks.firmware-precedence` 均构建通过；
   `nix flake check --no-build --all-systems` 全绿。
+- P3 基底的真实验收（本机 aarch64，只构建 configfile，不编译内核）：最终配置
+  `/nix/store/yp29wzznn09j84xy6wil1yajzrjyanzd-linux-config-7.2.0`，`generate-config.pl`
+  **0 个 error、15 条 warning**（14 条是 nixpkgs 自己标了 `optional` 的
+  `XEN_*`/`KEXEC_JUMP`/`PARAVIRT_SPINLOCKS`/`PCI_XEN`/`EXT3_FS_*`/`GLOB_SELFTEST`/
+  `CRC32_SELFTEST`/`CRYPTO_TEST`/`PERF_EVENTS_AMD_BRS`，第 15 条是本树新加的 `IMA`）。
+  `checks.aarch64-linux.config-symbols` 与 `nix flake check --no-build --all-systems` 均通过。
+- 负向测试：把 `ignoreConfigErrors` 删掉后构建，只报 `IMA` 一条 error；加上片段里的
+  `optional` 后归零。这正是第 25 条第 2 点的依据。
+- 新配置的关键取值：`ARM64_VA_BITS=52`/`ARM64_PA_BITS=52`、`# CONFIG_INTEGRITY is not set`、
+  `CONFIG_TCG_TPM=m`、`CONFIG_IMA` 不存在（只剩无关的
+  `# CONFIG_IMA_SECURE_AND_OR_TRUSTED_BOOT is not set`）、`CONFIG_LOCALVERSION="-gaokun3"`、
+  `CONFIG_BT_LE=y`、`CONFIG_CMA_SIZE_MBYTES=128`、`CONFIG_USB_PCI=y`、
+  `# CONFIG_VIDEO_QCOM_IRIS is not set`、`CONFIG_ACPI=y`/`CONFIG_TCG_CRB=m`、
+  `CONFIG_SECURITY_SELINUX` 未设、`CONFIG_SECURITY_APPARMOR=y`/`DEFAULT_SECURITY_APPARMOR=y`。
+- initrd 关心的模块在新配置里都在（名称换成 Kconfig 符号后核对）：`BLK_DEV_NVME`、
+  `PHY_QCOM_QMP_{PCIE,COMBO,USB}`、`PHY_QCOM_USB_SNPS_FEMTO_V2`、`USB_UAS`、`TYPEC`、
+  `PCI_PWRCTRL_PWRSEQ`、`ATH11K`、`ATH11K_PCI`、`I2C_HID_OF`、`SND_SOC_SC8280XP`、
+  `PINCTRL_SC8280XP_LPASS_LPI`、`SC_LPASSCC_8280XP`、`HID_MULTITOUCH`、
+  `DRM_PANEL_HIMAX_HX83121A`、`TOUCHSCREEN_HIMAX_HX83121A_SPI`、`BT_QCA`、`UHID` 为 `m`，
+  `EXT4_FS`、`USB_STORAGE`、`BLK_DEV_SD`、`USB_HID` 为 `y`。`BLK_DEV_NVME` 由 `y` 变 `m`
+  是这次唯一的启动路径变化，而 `nvme` 本来就在 `initrdModules` 和 nixpkgs 默认列表里；
+  `BTRFS_FS` 也由 `y` 变 `m`，NixOS 由 `boot.initrd.supportedFilesystems`（取自根分区类型，
+  `stage-1.nix:791`）自动加进 initrd。这两点仍要冷启动确认，见 11.4 第 7 条。
 
 ### 11.4 待办（用户侧）
 
@@ -842,6 +901,18 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
    TPM 那 90 秒已在撤销 `INTEGRITY` 后消失，重启时应确认总启动回到 ~15 s；蓝牙侧确认
    `patch-nvm-bdaddr.service` 成功且 `bluetooth.service` 拿到 patch 后的 BDADDR。CI 只构建内核，
    这些都测不到。失败就回滚到 P2：`boot.loader.systemd-boot.configurationLimit = 5` 已留有旧
-   generation。验证通过后再考虑把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
+   generation。
+   **基底已按第 24 条换成 `defconfig`**，`defconfig/gaokun3_defconfig` 因 Fedora 流水线保留，
+   所以这次冷启动还要多确认三件事：(a) DT 启动没有被 ACPI 抢走——`dmesg` 里应出现
+   `ACPI: Interpreter disabled.`（`drivers/acpi/bus.c:1580`，即编进来但没启用）、不应出现
+   `ACPI: Core revision`，`/sys/firmware/acpi` 不应存在（第 25 条）；(b) `nvme` 与（若根是 btrfs）
+   `btrfs` 已由 initrd 加载、根正常挂载（`BLK_DEV_NVME`/`BTRFS_FS` 由内建变模块）；
+   (c) 蓝牙、触屏、显示、音频这些 `=m` 的设备驱动仍按 DT 自动加载。
 8. 按新配置（`DEBUG_INFO`+`BTF`）重新量一次内核 `out`/`modules` 的压缩体积，更新 §5.11.5 与
-   README 关于 5 GB 配额的估计。
+   README 关于 5 GB 配额的估计。基底换成 `defconfig` 后平台驱动也多了，这次测量要一并覆盖。
+9. `boot.initrd.systemd.tpm2.enable = false`（第 16、25 条）现在只剩"initrd 里不放 TPM"这一个
+   作用：基底换成 nixpkgs defconfig 后 `TCG_CRB` 会被构建，当初"modules-closure 缺 `tpm-crb`"
+   的理由已消失。删掉它就回到 nixpkgs 默认（initrd 带上 `tpm-tis`/`tpm-crb` 与 tpm2 单元；
+   真正决定是否等待的是 `systemd-tpm2-generator`，而它在 `TCG_TPM=m` 下看不到
+   `/sys/class/tpmrm`）。这需要一次冷启动确认 `systemd-tpm2-generator` 没有把 `tpm2.target`
+   挂进 `sysinit.target`，不在本轮 P3 范围内。
