@@ -164,18 +164,31 @@ in {
       wantedBy = ["multi-user.target"];
       after = ["local-fs.target"];
       before = ["bluetooth.service"];
-      path = [pkgs.coreutils];
+      path = [pkgs.coreutils pkgs.zstd];
+      # ConditionPathExists is a [Unit] key. Systemd logs "Unknown key
+      # 'ConditionPathExists' in section [Service], ignoring" when it sits in
+      # serviceConfig, which is why this unit used to run on every boot and
+      # fail. Which NVM file exists depends on hardware.firmwareCompression
+      # (zstd for this kernel), so the source is chosen inside the script.
+      unitConfig.ConditionPathExists = "/sys/module/firmware_class/parameters/path";
       serviceConfig = {
         Type = "oneshot";
-        ConditionPathExists = [
-          "/sys/module/firmware_class/parameters/path"
-          "/run/current-system/firmware/qca/wcnhpnv21g.bin"
-        ];
         ExecStart = pkgs.writeShellScript "patch-nvm-bdaddr" ''
           set -eu
+          base=/run/current-system/firmware/qca/wcnhpnv21g.bin
           dst=/var/lib/gaokun3/firmware/qca
           mkdir -p "$dst"
-          cp -f /run/current-system/firmware/qca/wcnhpnv21g.bin "$dst/"
+          # The kernel loads .zst transparently, but the patcher needs the
+          # bytes, so put an uncompressed copy in the writable directory that
+          # firmware_class.path makes it prefer.
+          if [ -f "$base" ]; then
+            cp -f "$base" "$dst/wcnhpnv21g.bin"
+          elif [ -f "$base.zst" ]; then
+            zstd -d -c "$base.zst" > "$dst/wcnhpnv21g.bin"
+          else
+            echo "no QCA NVM firmware to patch" >&2
+            exit 0
+          fi
           GAOKUN_NVM_DIR="$dst" ${tools}/bin/patch-nvm-bdaddr.py
           echo -n "/var/lib/gaokun3/firmware:/run/current-system/firmware" \
             > /sys/module/firmware_class/parameters/path

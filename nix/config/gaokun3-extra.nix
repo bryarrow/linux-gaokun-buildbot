@@ -33,12 +33,16 @@ in {
   # boot.initrd.includeDefaultModules go back to its default.
   USB_PCI = {tristate = "y";};
 
-  # common-config.nix asks for IMA, which is only visible under INTEGRITY. The
-  # upstream arm64 defconfig leaves INTEGRITY at its default "y"; the Gaokun3
-  # fragment disabled it, so IMA was dropped. IMA and EVM carry
-  # order = LSM_ORDER_LAST and security/Kconfig says those are always enabled
-  # once selected, so this does not depend on CONFIG_LSM.
-  INTEGRITY = {tristate = "y";};
+  # INTEGRITY is deliberately NOT set here, even though common-config.nix asks
+  # for IMA and IMA is only visible under it. Enabling INTEGRITY makes IMA's
+  # Kconfig select TCG_TPM (security/integrity/ima/Kconfig:12), which turns the
+  # TPM core from a module into a builtin; /sys/class/tpmrm then exists from
+  # boot, systemd's tpm2 generator hooks tpm2.target -- whose unit says
+  # Wants=dev-tpm0.device -- into sysinit.target, and the boot spends the full
+  # 90 s device timeout waiting for a TPM this machine does not have. That cost
+  # 90 s of boot on 2026-09-25 and was reverted the same day. IMA would run in
+  # TPM-bypass here anyway (device tree boot, no ACPI, no microsoft,ftpm node),
+  # so nothing was gained. checks.config-symbols asserts both ends of the chain.
 
   # v7.2 guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and the sm8250
   # tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS, while
