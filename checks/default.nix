@@ -137,9 +137,14 @@ in {
     # nix/config/gaokun3-extra.nix
     grep -qx 'CONFIG_CMA_SIZE_MBYTES=128' "$cfg"
     grep -qx 'CONFIG_USB_PCI=y' "$cfg"
-    grep -qx 'CONFIG_INTEGRITY=y' "$cfg"
-    grep -qx 'CONFIG_IMA=y' "$cfg"
     grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
+
+    # INTEGRITY stays off, and with it IMA. Enabling it makes IMA select
+    # TCG_TPM, and a builtin TPM core makes systemd's tpm2 generator wait the
+    # full 90 s device timeout for a /dev/tpm0 that never appears on this
+    # machine (see nix/config/gaokun3-extra.nix). Both ends are asserted.
+    grep -qx '# CONFIG_INTEGRITY is not set' "$cfg"
+    grep -qx 'CONFIG_TCG_TPM=m' "$cfg"
 
     # Identity: the module directory and CONFIG_LOCALVERSION must agree.
     grep -qx 'CONFIG_LOCALVERSION="-gaokun3"' "$cfg"
@@ -151,8 +156,8 @@ in {
       exit 1
     fi
 
-    # CONFIG_LSM no longer names the removed "integrity" LSM; IMA and EVM are
-    # LSM_ORDER_LAST and always enabled once selected.
+    # CONFIG_LSM comes from the kernel default now; it must not name the
+    # "integrity" LSM, which no longer exists in 7.2.
     if grep -q '^CONFIG_LSM=.*,integrity,' "$cfg"; then
       echo "CONFIG_LSM still names the removed integrity LSM" >&2
       exit 1
