@@ -728,6 +728,15 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 14. **覆盖 common config 需要显式优先级。** `common-config.nix` 的选项是优先级 100 的普通
     定义，同优先级的第二个定义会直接报冲突（`CMA_SIZE_MBYTES` 实测）。`nix/config/gaokun3-extra.nix`
     用 `lib.mkOverride 90` 覆盖，并保留 `mkForce`(50) 给用户——与 `zen-kernels.nix` 同一惯例。
+15. **P3 首次 CI 失败于 configfile，需要 `ignoreConfigErrors`。** `generate-config.pl` 在
+    aarch64 上把"common config 设了但用不上"的选项当致命错误，7.2.0 下有 27 个：都是别的
+    平台的驱动，其父 menu 被 gaokun3_defconfig 显式关掉（`RTW88` 在 `WLAN_VENDOR_REALTEK` 下、
+    `SND_AC97` 在 `SND_PCI` 下……），外加 `NVME_AUTH`（common 要 `m`、基底是 `y`）。这些都不是
+    本树的错误，因此设 `ignoreConfigErrors = true`（`3844f77b`），与 `linux-rpi.nix` 同理。
+16. **`tpm2.enable = false` 不能删。** 设计 §6 P3 把它列为要删除的补偿之一，但本机是**设备树
+    启动**，`CONFIG_ACPI` 关闭 → `TCG_CRB` 从不构建；而 nixpkgs 的 systemd initrd 在 aarch64
+    上无条件加 `tpm-crb`（`nixos/modules/system/boot/systemd/tpm2.nix`），modules-closure 会失败。
+    实机验证后保留。P3 真正删掉的只有 `includeDefaultModules = false`。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -748,10 +757,15 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
   tools 均可构建；tools 的 `postPatch` 替换出现在 `.patch-nvm-bdaddr.py-wrapped`；
   UCM 包的 `sc8280xp.conf` 与 `tools/audio/sc8280xp.conf` 一致；`nix build .` 现在产出
   firmware 而非内核；`firmware-precedence` 用 `mkAfter` 负向测试确认会失败。
-- P3 分析（纯求值，未构建）：基底 `defconfig = "defconfig"` + `enableCommonConfig` 的
-  configfile 可求出；与 `gaokun3_defconfig` 比对，504 个符号里 110 个与 nixpkgs 显式策略
-  重叠、其中仅 12 个值冲突，故增量只需 3 条。`nix flake check --no-build --all-systems`
-  在开启 `enableCommonConfig` 后仍通过。
+- P3 分析（纯求值，未构建）：与 `gaokun3_defconfig` 比对，504 个符号里 110 个与 nixpkgs
+  显式策略重叠、其中仅 12 个值冲突。`nix flake check --no-build --all-systems` 在开启
+  `enableCommonConfig` 后仍通过。
+- P3 configfile（`3844f77b` 后）：本地构建成功（`00srxgk3…`）。逐个核对 NixOS 默认 initrd
+  列表的模块，全部以 `m` 或内建存在（`sata_*`/`ata_piix`/`pata_marvell`=m、`sd_mod`/`nvme`/
+  `usbhid`/`hid_generic`/`xhci_hcd`/`xhci_pci` 内建、`ehci`/`ohci`/`uhci`/`hid_*`/`mmc_block`=m），
+  自有的 initrdModules 也都在。与 P3 前的配置逐符号 diff：**没有硬件驱动丢失**，差异全是
+  nixpkgs 策略——LSM 默认由 SELinux 变 AppArmor、抢占变 `PREEMPT_LAZY`、autoModules 之前打开
+  的 KUNIT/自测模块被关掉。
 
 ### 11.4 待办（用户侧）
 
@@ -765,7 +779,8 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
    确认 `out` 与 `modules` 都命中。
 6. 裁定 tools 包的 `meta.license`：`chiyuki0325/EGoTouchRev-Linux` 未声明许可，需要
    维护者确认，或在包内注明来源与授权状态。
-7. **实机冷启动验证 P3。** CI 只会构建内核，`includeDefaultModules` 与 `tpm2` 两处删除的
-   真正检验在 `nixos-rebuild` 与冷启动（modules-closure 与 initrd）。失败就回滚到 P2：
-   `boot.loader.systemd-boot.configurationLimit = 5` 已留有旧 generation。验证通过后再考虑
-   把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
+7. **实机冷启动验证 P3。** CI 只构建内核，`includeDefaultModules` 删除的真正检验在
+   `nixos-rebuild` 与冷启动（modules-closure 与 initrd）；`tpm2.enable = false` 已保留（见
+   11.2 第 16 条）。失败就回滚到 P2：`boot.loader.systemd-boot.configurationLimit = 5`
+   已留有旧 generation。验证通过后再考虑把基底换成 `defconfig` 并删除
+   `defconfig/gaokun3_defconfig`。
