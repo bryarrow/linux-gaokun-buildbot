@@ -711,13 +711,15 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     只构建并推送了内核的 `out`，`modules`（system closure 与 initramfs 需要）从未构建，
     设备即使替换了镜像仍要整编。现已显式引用 `linux-gaokun3.modules`（`9bfa8883`）。这也是
     官方缓存里 `out`/`modules`/`dev` 齐全的原因：Hydra realise 整条 derivation。
-11. **§5.9 的固件优先级方向写反。** nixpkgs 的 `hardware.firmware` 文档与 `buildEnv`
-    （`ignoreCollisions = true`）都规定**列表中第一个包胜出**；原设计建议 `lib.mkAfter`，
-    那会把 gaokun3 排到 linux-firmware 之后，反而让后者胜出。实现用 `lib.mkBefore`
-    （`f9fc6b28`），`checks.firmware-precedence` 负向测试（换成 `mkAfter` 即报错）已验证。
-12. **tools 包的许可无法确认。** `patch-nvm-bdaddr.py` 上游（whitelewi1-ctrl）是 GPL-2.0，
-    而 `chiyuki0325/EGoTouchRev-Linux` 没有 license 文件（GitHub license API 404）。因此
-    `meta.license = gpl2Plus` 对组合作品并不成立，先保留并留待维护者裁定，未擅自改许可。
+11. **§5.9 的固件优先级方向写反。** nixpkgs 的 `hardware.firmware` 文档说**列表中第一个包胜出**；
+    `buildEnv` 的实现更细：先比 `meta.priority`（小者胜），priority 相等才先入者胜
+    （`builder.pl:159`）。`linux-firmware` 的 `meta.priority = 6`，我们的 firmware 未设 →
+    `lib.meta.defaultPriority = 5`，所以**今天本来就赢**，`lib.mkBefore`（`f9fc6b28`）是双保险。
+    `checks.firmware-precedence` 现在按"priority + 顺序"断言胜出，而不只断言顺序。
+12. **tools 包的许可已从 `meta.license` 移除。** `patch-nvm-bdaddr.py` 上游（whitelewi1-ctrl）
+    是 GPL-2.0，而 `chiyuki0325/EGoTouchRev-Linux` 没有 license 文件（GitHub license API 404），
+    组合作品没有任何单一 SPDX 标识成立。`meta.license` 本就是可选的，因此去掉字段、只留注释，
+    等维护者裁定。
 13. **P3 的基底暂时仍是 `gaokun3_defconfig`。** 设计 §5.4 的终点是 `defconfig = "defconfig"`
     加一份经审查的 Gaokun 片段。把 defconfig 与 nixpkgs `common-config.nix` 的**显式**符号集
     比对后，真正"两边都设了但值不同"的只有 12 个（LSM order、preemption、tracing、驱动家族
@@ -729,14 +731,43 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     定义，同优先级的第二个定义会直接报冲突（`CMA_SIZE_MBYTES` 实测）。`nix/config/gaokun3-extra.nix`
     用 `lib.mkOverride 90` 覆盖，并保留 `mkForce`(50) 给用户——与 `zen-kernels.nix` 同一惯例。
 15. **P3 首次 CI 失败于 configfile，需要 `ignoreConfigErrors`。** `generate-config.pl` 在
-    aarch64 上把"common config 设了但用不上"的选项当致命错误，7.2.0 下有 27 个：都是别的
-    平台的驱动，其父 menu 被 gaokun3_defconfig 显式关掉（`RTW88` 在 `WLAN_VENDOR_REALTEK` 下、
-    `SND_AC97` 在 `SND_PCI` 下……），外加 `NVME_AUTH`（common 要 `m`、基底是 `y`）。这些都不是
-    本树的错误，因此设 `ignoreConfigErrors = true`（`3844f77b`），与 `linux-rpi.nix` 同理。
+    aarch64 上把"common config 设了但用不上"的选项当致命错误，7.2.0 下有 27 个：多数是别的
+    平台的驱动，其父 menu 被 gaokun3_defconfig 关掉（`RTW88`、`ROCKCHIP_*`、`SUN8I_*`……），
+    外加 `IMA`、以及 `NVME_AUTH`（common 要 `m`、基底是 `y`）。**`IMA` 不是"别的平台的驱动"**：
+    common config 要求 `IMA = yes`，它只是因为 defconfig 写了 `# CONFIG_INTEGRITY is not set`
+    而不可见（上游 arm64 defconfig 没有这一行），处理见第 17 条。其余不是本树的错误，因此设
+    `ignoreConfigErrors = true`（`3844f77b`），与 `linux-rpi.nix` 同理；代价由
+    `checks.config-symbols`（第 20 条）补回。
 16. **`tpm2.enable = false` 不能删。** 设计 §6 P3 把它列为要删除的补偿之一，但本机是**设备树
     启动**，`CONFIG_ACPI` 关闭 → `TCG_CRB` 从不构建；而 nixpkgs 的 systemd initrd 在 aarch64
     上无条件加 `tpm-crb`（`nixos/modules/system/boot/systemd/tpm2.nix`），modules-closure 会失败。
-    实机验证后保留。P3 真正删掉的只有 `includeDefaultModules = false`。
+    依据是**现行内核实测**：`/run/current-system/kernel`（P3 前的 `w674i7r…`）的 modules 里有
+    `tpm_tis.ko`/`tpm_ftpm_tee.ko`、没有 `tpm_crb.ko`；不是 P3 的实机验证（尚无该 generation）。
+    P3 真正删掉的只有 `includeDefaultModules = false`。
+17. **开 `INTEGRITY`，并删掉 defconfig 的 `CONFIG_LSM`。** common config 要 `IMA = yes`，而 `IMA`
+    只在 `INTEGRITY` 下可见；上游 arm64 defconfig 让 `INTEGRITY` 取默认 `y`，是 Gaokun 片段把它
+    关掉的，delta 因此增加 `INTEGRITY = {tristate = "y";}`。同时按决定从
+    `defconfig/gaokun3_defconfig` 删除 `CONFIG_LSM="…"`（该串里的 `integrity` 在 7.2 已不是 LSM），
+    改用内核默认：实测得到
+    `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
+    ——**AppArmor 因此才真正进入列表**（旧串里没有它）。IMA/EVM 带 `order = LSM_ORDER_LAST`，
+    `security/Kconfig:279` 说这类"只要编入就始终启用"，所以不依赖 `CONFIG_LSM`。
+    注意 `defconfig/` 与 Fedora 流水线共用，这次改动同样作用于 Fedora 侧。
+18. **调试信息改用 nixpkgs 策略。** common config 打开 `DEBUG_INFO=y` +
+    `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y` + `DEBUG_INFO_BTF(_MODULES)=y`（P3 前是
+    `DEBUG_INFO_NONE=y`）。安装时会 strip、`-dev` 又被 pushFilter 排除，缓存体积增长有限，但
+    CI 时长与 `dev` 输出会增加。§5.11.5 与 README 的"每个版本几百 MB、5 GB 能放几个版本"需要
+    按新配置重新量一次（尚未做）。
+19. **`CONFIG_RUST=y`。** common config 在 aarch64 + ≥6.12 + rustc 可用时开 `RUST`；新配置确认
+    为 `y`，内核构建因此需要 rustc/bindgen，并有 `RUST_IS_AVAILABLE` 断言与额外时长。
+20. **新增 `checks.config-symbols`，PR 也构建它。** 它构建 configfile（分钟级，不编译内核）并
+    断言 delta 的每一条、`CONFIG_LOCALVERSION`、`IMA`/`INTEGRITY`、无 `TCG_CRB`、`CONFIG_LSM`
+    不再含 `integrity`。这样 `ignoreConfigErrors` 的降级被补回可控保证，配置类回归在 PR 就拦住
+    （此前 PR 只 `--no-build`）。
+21. **仓库 URL 统一到 `bryarrow/linux-gaokun-buildbot`**（README 的 flake input/release/
+    `nix build` 三处与 4 个包的 `meta.homepage`），与 git remote、宿主 flake 实际拉取一致。
+    CI action 仍是可变 tag（`checkout@v6`、`install-nix-action@v31`、`cachix-action@v17`），与仓库
+    其它 workflow 风格一致，暂不 pin 到 SHA。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -760,12 +791,20 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 - P3 分析（纯求值，未构建）：与 `gaokun3_defconfig` 比对，504 个符号里 110 个与 nixpkgs
   显式策略重叠、其中仅 12 个值冲突。`nix flake check --no-build --all-systems` 在开启
   `enableCommonConfig` 后仍通过。
-- P3 configfile（`3844f77b` 后）：本地构建成功（`00srxgk3…`）。逐个核对 NixOS 默认 initrd
-  列表的模块，全部以 `m` 或内建存在（`sata_*`/`ata_piix`/`pata_marvell`=m、`sd_mod`/`nvme`/
-  `usbhid`/`hid_generic`/`xhci_hcd`/`xhci_pci` 内建、`ehci`/`ohci`/`uhci`/`hid_*`/`mmc_block`=m），
-  自有的 initrdModules 也都在。与 P3 前的配置逐符号 diff：**没有硬件驱动丢失**，差异全是
-  nixpkgs 策略——LSM 默认由 SELinux 变 AppArmor、抢占变 `PREEMPT_LAZY`、autoModules 之前打开
-  的 KUNIT/自测模块被关掉。
+- P3 configfile：本地构建成功（`2i8c4833…`）。逐个核对 NixOS 默认 initrd 列表的模块，全部以
+  `m` 或内建存在（`sata_*`/`ata_piix`/`pata_marvell`=m、`sd_mod`/`nvme`/`usbhid`/`hid_generic`/
+  `xhci_hcd`/`xhci_pci` 内建、`ehci`/`ohci`/`uhci`/`hid_*`/`mmc_block`=m），自有的 initrdModules
+  也都在。与 P3 前的配置逐符号 diff：**没有硬件驱动丢失**。差异分三类：
+  1. nixpkgs 策略：抢占变 `PREEMPT_LAZY`、`NO_HZ_FULL`（取代 `NO_HZ_IDLE`）、`CONFIG_RUST=y`、
+     `DEBUG_INFO`+`DWARF`+`BTF`、autoModules 之前打开的 KUNIT/自测模块被关掉；
+  2. 本轮决定：`INTEGRITY=y`（连带 `IMA=y`）、`CONFIG_LSM` 改用内核默认
+     `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
+     （旧串只有 `selinux`，**没有 `apparmor`**；又因非默认 `CONFIG_LSM` 会覆盖
+     `DEFAULT_SECURITY_*`，"LSM 默认变 AppArmor"那句原本无效）；
+  3. 无实际影响：`SND_AC97_POWER_SAVE`（`depends on SND_AC97_CODEC`，与 `SND_PCI` 无关）、
+     `HID_PICOLCD_*` 之类。
+- 新增的 `checks.config-symbols` 与 priority-aware 的 `checks.firmware-precedence` 均构建通过；
+  `nix flake check --no-build --all-systems` 全绿。
 
 ### 11.4 待办（用户侧）
 
@@ -777,10 +816,12 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 4. §5.13 的 tag 化：宿主已改为跟 `main`，但仍是一个可变分支，需要一个不可变 tag。
 5. CI 跑过一次后，用 `nix path-info --store https://gaokun3.cachix.org <kernel-path>`
    确认 `out` 与 `modules` 都命中。
-6. 裁定 tools 包的 `meta.license`：`chiyuki0325/EGoTouchRev-Linux` 未声明许可，需要
-   维护者确认，或在包内注明来源与授权状态。
-7. **实机冷启动验证 P3。** CI 只构建内核，`includeDefaultModules` 删除的真正检验在
-   `nixos-rebuild` 与冷启动（modules-closure 与 initrd）；`tpm2.enable = false` 已保留（见
-   11.2 第 16 条）。失败就回滚到 P2：`boot.loader.systemd-boot.configurationLimit = 5`
-   已留有旧 generation。验证通过后再考虑把基底换成 `defconfig` 并删除
-   `defconfig/gaokun3_defconfig`。
+6. （字段已移除）tools 包的 `meta.license` 已删掉、只留注释；将来若要写，需要先确认
+   `chiyuki0325/EGoTouchRev-Linux` 的授权状态。
+7. **实机冷启动验证 P3，并观察这些行为差异**：`includeDefaultModules` 删除后的
+   modules-closure/initrd、`NO_HZ_FULL` 取代 `NO_HZ_IDLE` 后的功耗与计时、`INTEGRITY`/`IMA`
+   与新的 `CONFIG_LSM`。CI 只构建内核，这些都测不到。失败就回滚到 P2：
+   `boot.loader.systemd-boot.configurationLimit = 5` 已留有旧 generation。验证通过后再考虑
+   把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
+8. 按新配置（`DEBUG_INFO`+`BTF`）重新量一次内核 `out`/`modules` 的压缩体积，更新 §5.11.5 与
+   README 关于 5 GB 配额的估计。
