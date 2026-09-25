@@ -61,26 +61,15 @@ in
       # kernel.release is "7.2.0" + CONFIG_LOCALVERSION="-gaokun3".
       modDirVersion = "${pins.kernelVersion}-gaokun3";
       defconfig = "gaokun3_defconfig";
-      # gaokun3_defconfig is an independent distribution kernel policy (the
-      # Fedora build applies nothing on top of it), and nixpkgs' common-config
-      # demands values for several symbols this defconfig sets differently
-      # (e.g. NVME_AUTH). Skip the common config; structuredExtraConfig and
-      # boot.kernelPatches still apply. Converging on nixpkgs' aarch64 config
-      # plus a reviewed delta is a separate, hardware-verified change.
-      enableCommonConfig = false;
 
-      # v7.2 upstream guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and
-      # the sm8250 tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS,
-      # while nixpkgs' autoModules answers "m" to every tristate question and
-      # would re-enable IRIS, breaking the Venus build. IRIS does not support
-      # sc8280xp; keep it off here explicitly. The Fedora path already
-      # respects "# CONFIG_VIDEO_QCOM_IRIS is not set" in the defconfig.
-      structuredExtraConfig = {
-        VIDEO_QCOM_IRIS = {
-          tristate = "n";
-          optional = true;
-        };
-      };
+      # nixpkgs' common config now owns the distribution policy; the delta in
+      # nix/config/gaokun3-extra.nix re-asserts only what the hardware forces.
+      # gaokun3_defconfig stays the base for now, so Gaokun3 values that neither
+      # policy mentions survive. Moving the base to the kernel's own defconfig
+      # and deleting the fragment is a follow-up that needs the whole fragment
+      # reviewed against hardware.
+      enableCommonConfig = true;
+      structuredExtraConfig = import ../../nix/config/gaokun3-extra.nix {inherit lib;};
 
       extraMeta = {
         description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${pins.kernelVersion}";

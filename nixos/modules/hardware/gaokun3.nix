@@ -132,19 +132,12 @@ in {
       extra-trusted-public-keys = ["gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAMJr7ibBxJtIsI="];
     };
 
-    # The defconfig is an independent distribution kernel policy (the Fedora
-    # build applies nothing on top of it), so several modules in NixOS's
-    # default initrd list (ehci_pci, uhci_hcd, ohci_pci, hid_apple, sata_*,
-    # ...) have no .ko here and would fail the modules-closure shrink. USB is
-    # builtin xhci; the initrdModules list above is the complete set.
-    boot.initrd.includeDefaultModules = false;
+    # P3 turned on nixpkgs' common config, which provides the SATA/USB/HID and
+    # TPM modules NixOS' default initrd list asks for, so that list is no longer
+    # suppressed. USB_PCI is re-enabled in nix/config/gaokun3-extra.nix because
+    # ehci_pci/ohci_pci/xhci_pci only exist with it.
     boot.initrd.availableKernelModules = initrdModules;
     boot.kernelModules = bootModules;
-    # The systemd initrd's default TPM2 support adds tpm-crb to the initrd
-    # modules, but this kernel has no CRB driver (only tpm-tis / tpm_ftpm_tee)
-    # and the plain NVMe root needs no initrd TPM; otherwise the modules-closure
-    # shrink fails on the missing module.
-    boot.initrd.systemd.tpm2.enable = false;
     # ath11k's probe synchronously request_module()s the QRTR family
     # (net-pf-42) from an async workqueue while qrtr.ko depends on ath11k and
     # mhi. When qrtr is not already loaded the modprobe chain can wedge the
