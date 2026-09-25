@@ -56,9 +56,15 @@ jobs:
           # cache, so pull requests pull but never push.
           skipPush: ${{ github.event_name == 'pull_request' }}
 
-      - name: Evaluate only (pull request)
+      # `nix flake check --no-build` only evaluates, so a kernel config
+      # regression could not be caught here. config-symbols builds the
+      # configfile alone (minutes, no kernel compile) and asserts that the
+      # delta in nix/config/gaokun3-extra.nix landed.
+      - name: Evaluate and check the kernel config (pull request)
         if: github.event_name == 'pull_request'
-        run: nix flake check --no-build
+        run: |
+          nix flake check --no-build
+          nix build --no-link '.#checks.aarch64-linux.config-symbols'
 
       # checks.packages forces every package output, so this is the build that
       # populates the cache. The Cachix daemon pushes store paths as they are

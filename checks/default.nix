@@ -79,10 +79,12 @@ in {
     ];
   };
 
-  # `hardware.firmware` builds a buildEnv with ignoreCollisions, and nixpkgs
-  # resolves a name present in several packages to the first package in its
-  # input list. The module uses mkBefore for that reason; this asserts the
-  # outcome from the env's own input order, without building linux-firmware.
+  # `hardware.firmware` builds a buildEnv with ignoreCollisions, and the winner
+  # of a name present in several packages is decided by priority first and by
+  # input order only when the priorities are equal (builder.pl:159). The module
+  # uses mkBefore, but that alone is not the reason ours wins: linux-firmware
+  # carries meta.priority = 6 and our package takes the default 5. This asserts
+  # the outcome from those two facts, without building linux-firmware.
   firmwareNames = map (p: p.name or "") evaluated.config.hardware.firmware.paths;
   indexWhere = pred:
     lib.findFirst (i: pred (lib.elemAt firmwareNames i)) null
@@ -91,6 +93,13 @@ in {
   stockIndex = indexWhere (
     name: lib.hasPrefix "linux-firmware-" name && !(lib.hasPrefix "linux-firmware-gaokun3" name)
   );
+  firmwarePriorities = {
+    gaokun3 = self.packages.${system}.firmware-gaokun3.meta.priority or lib.meta.defaultPriority;
+    stock = pkgs.linux-firmware.meta.priority or lib.meta.defaultPriority;
+  };
+  firmwareWins =
+    firmwarePriorities.gaokun3 < firmwarePriorities.stock
+    || (firmwarePriorities.gaokun3 == firmwarePriorities.stock && gaokun3Index < stockIndex);
 
   # Keep only the toplevel drvPath, so the check builds a tiny script instead
   # of a kernel. The drvPath string carries a dependency context that would
@@ -104,9 +113,53 @@ in {
   '';
 
   firmware-precedence =
-    if gaokun3Index != null && stockIndex != null && gaokun3Index < stockIndex
+    if gaokun3Index != null && stockIndex != null && firmwareWins
     then pkgs.runCommand "gaokun3-firmware-precedence" {} "touch $out"
-    else throw "gaokun3 firmware must precede linux-firmware in hardware.firmware; got: ${lib.concatStringsSep ", " firmwareNames}";
+    else throw ''
+      gaokun3 firmware would lose to linux-firmware in hardware.firmware:
+      priorities gaokun3=${toString firmwarePriorities.gaokun3} stock=${toString firmwarePriorities.stock},
+      order gaokun3=${toString gaokun3Index} stock=${toString stockIndex},
+      list: ${lib.concatStringsSep ", " firmwareNames}
+    '';
+
+  # The kernel package turns generate-config.pl's fatal checks off, because
+  # against 7.2.0 some common-config options are unusable. That also silences
+  # errors in this repository's own delta, so this check puts the guarantee
+  # back: it builds the configfile -- minutes, not a kernel compile -- and
+  # asserts every delta entry and the assumptions behind them actually landed.
+  #
+  # The pull-request workflow builds this check explicitly, because
+  # `nix flake check --no-build` only evaluates and would never catch a config
+  # regression.
+  config-symbols = pkgs.runCommand "gaokun3-config-symbols" {} ''
+    cfg=${kernel.configfile}
+
+    # nix/config/gaokun3-extra.nix
+    grep -qx 'CONFIG_CMA_SIZE_MBYTES=128' "$cfg"
+    grep -qx 'CONFIG_USB_PCI=y' "$cfg"
+    grep -qx 'CONFIG_INTEGRITY=y' "$cfg"
+    grep -qx 'CONFIG_IMA=y' "$cfg"
+    grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
+
+    # Identity: the module directory and CONFIG_LOCALVERSION must agree.
+    grep -qx 'CONFIG_LOCALVERSION="-gaokun3"' "$cfg"
+
+    # The tpm2 workaround in the module assumes this machine has no ACPI and so
+    # no CRB driver. If a future change builds one, revisit that workaround.
+    if grep -q '^CONFIG_TCG_CRB' "$cfg"; then
+      echo "TCG_CRB is built, but the tpm2 initrd workaround assumes it is not" >&2
+      exit 1
+    fi
+
+    # CONFIG_LSM no longer names the removed "integrity" LSM; IMA and EVM are
+    # LSM_ORDER_LAST and always enabled once selected.
+    if grep -q '^CONFIG_LSM=.*,integrity,' "$cfg"; then
+      echo "CONFIG_LSM still names the removed integrity LSM" >&2
+      exit 1
+    fi
+
+    touch $out
+  '';
 
   # Building this forces every package, and the kernel's `modules` output
   # explicitly. A linkFarm only realises each package's default output, so `out`

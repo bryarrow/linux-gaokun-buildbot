@@ -72,20 +72,21 @@ in
       structuredExtraConfig = import ../../nix/config/gaokun3-extra.nix {inherit lib;};
 
       # common-config.nix is written for the kernel nixpkgs ships, so against
-      # 7.2.0 some of its options are unused: the Gaokun3 defconfig deliberately
-      # leaves other platforms' vendor menus closed and those options live under
-      # them (RTW88 under WLAN_VENDOR_REALTEK, SND_AC97 under SND_PCI, ...).
-      # NVME_AUTH is the reverse case, where common config asks for "m" and the
-      # base has "y". Neither is a mistake in this tree, so the generate-config
+      # 7.2.0 some of its options cannot be used: 27 of them, most being other
+      # platforms' drivers under menus the Gaokun3 defconfig closes (RTW88,
+      # ROCKCHIP_*, SUN8I_*, ...), plus IMA, which was invisible only because
+      # this defconfig disabled INTEGRITY -- nix/config/gaokun3-extra.nix turns
+      # it back on -- and NVME_AUTH, where common config asks for "m" and the
+      # base has "y". None is a mistake in this tree, so the generate-config
       # checks are warnings here; linux-rpi.nix does the same for the same
-      # reason. nixpkgs leaves this false on aarch64 so that a typo in
-      # structuredExtraConfig is fatal, which is why that delta stays small and
-      # reviewed.
+      # reason. checks.config-symbols is the compensating control: it builds the
+      # configfile and asserts this delta actually landed, so a typo fails CI
+      # instead of becoming a warning nobody reads.
       ignoreConfigErrors = true;
 
       extraMeta = {
         description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${pins.kernelVersion}";
-        homepage = "https://github.com/KawaiiHachimi/linux-gaokun-buildbot";
+        homepage = "https://github.com/bryarrow/linux-gaokun-buildbot";
         platforms = lib.platforms.aarch64;
       };
     }
