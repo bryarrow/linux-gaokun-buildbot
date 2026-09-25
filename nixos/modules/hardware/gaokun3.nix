@@ -13,21 +13,6 @@
   firmware = pkgs.linux-firmware-gaokun3;
   tools = pkgs.gaokun3-tools;
 
-  # The Fedora image installs its sc8280xp.conf over the one from
-  # alsa-ucm-conf. NixOS finds UCM2 files at $ALSA_CONFIG_UCM2 (alsa-lib reads
-  # it), so ship a merged copy of the stock tree with ours on top.
-  # The stock tree already ships a stock sc8280xp.conf; cp -a preserves the
-  # store's read-only permissions (555 dirs, 444 files), which makes both rm
-  # and install's unlink fail inside the sandbox. Make the copy writable
-  # first, then replace the stock file with ours.
-  ucm2Dir = pkgs.runCommand "alsa-ucm-conf-gaokun3" {} ''
-    mkdir -p $out
-    cp -a ${pkgs.alsa-ucm-conf}/share/alsa/ucm2/. $out/
-    chmod -R u+w $out
-    rm -f $out/Qualcomm/sc8280xp/sc8280xp.conf
-    install -Dm644 ${../../../tools/audio/sc8280xp.conf} $out/Qualcomm/sc8280xp/sc8280xp.conf
-  '';
-
   # Mirrors the Fedora image's dracut add_drivers, minus btrfs (NixOS stages
   # the root-filesystem driver itself) and the firmware_class path.
   initrdModules = [
@@ -131,7 +116,11 @@ in {
     # WCN6855, QCA Bluetooth and Adreno 660 firmware come from linux-firmware,
     # as on the Fedora image (atheros-firmware / qcom-firmware).
     hardware.enableRedistributableFirmware = lib.mkDefault true;
-    hardware.firmware = cfg.firmware;
+    # `hardware.firmware` resolves a name present in several packages to the
+    # first one in its list, so our copy has to come before linux-firmware's.
+    # mkBefore makes that ordering a guarantee instead of a by-product of the
+    # module merge order. checks.firmware-precedence covers the result.
+    hardware.firmware = lib.mkBefore cfg.firmware;
 
     hardware.bluetooth.enable = lib.mkDefault true;
 
@@ -247,7 +236,7 @@ in {
       };
     };
 
-    environment.sessionVariables.ALSA_CONFIG_UCM2 = "${ucm2Dir}";
+    environment.sessionVariables.ALSA_CONFIG_UCM2 = "${pkgs.alsa-ucm-conf-gaokun3}";
 
     environment.systemPackages = [tools];
   };

@@ -47,25 +47,19 @@
           config.allowUnfreePredicate = allowUnfreePredicate;
         };
   in {
-    # The overlay exposes this flake's own builds rather than packages rebuilt
-    # with the consumer's nixpkgs. A stock kernel is the same derivation for
-    # everyone on one nixpkgs revision, which is why cache.nixos.org works; a
-    # third-party kernel loses that as soon as it is rebuilt against each
-    # consumer's nixpkgs. Pinning it to the flake's nixpkgs restores the
-    # property: the derivation, and so the cache entry, is fixed by this
-    # repository's commit for every consumer.
-    overlays.default = final: prev: {
-      linux-gaokun3 = self.packages.${prev.system}.linux-gaokun3;
-      linuxPackages_gaokun3 = prev.linuxPackagesFor final.linux-gaokun3;
-      linux-firmware-gaokun3 = self.packages.${prev.system}.firmware-gaokun3;
-      gaokun3-tools = self.packages.${prev.system}.tools-gaokun3;
-    };
+    # See overlays/default.nix: the names point at this flake's own builds so
+    # that every consumer gets the same derivations, and with them the same
+    # binary cache entries, rather than one rebuild per consumer nixpkgs.
+    overlays.default = import ./overlays {inherit self;};
 
     packages = forAllSystems (system: {
       linux-gaokun3 = (kernelPkgsFor system).callPackage ./pkgs/linux-gaokun3 {};
       firmware-gaokun3 = (pkgsFor system).callPackage ./pkgs/firmware-gaokun3 {};
       tools-gaokun3 = (pkgsFor system).callPackage ./pkgs/tools-gaokun3 {};
-      default = self.packages.${system}.linux-gaokun3;
+      alsa-ucm-conf-gaokun3 = (pkgsFor system).callPackage ./pkgs/alsa-ucm-conf-gaokun3 {};
+      # Deliberately not the kernel: `nix build .` should not start a one to
+      # three hour compile.
+      default = self.packages.${system}.firmware-gaokun3;
     });
 
     checks = forAllSystems (system:
