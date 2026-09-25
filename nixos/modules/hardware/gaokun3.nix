@@ -139,11 +139,14 @@ in {
     boot.initrd.availableKernelModules = initrdModules;
     boot.kernelModules = bootModules;
     # The systemd initrd's TPM2 support adds tpm-tis and tpm-crb
-    # (nixos/modules/system/boot/systemd/tpm2.nix). This machine boots from the
-    # device tree, so CONFIG_ACPI is off and TCG_CRB is never built -- only
-    # tpm-tis/tpm_ftpm_tee exist -- and the modules-closure would fail on
-    # tpm-crb. The NVMe root needs no initrd TPM. This stays even though the
-    # common config is on; it is not one of the compensations P3 removed.
+    # (nixos/modules/system/boot/systemd/tpm2.nix). This machine has no usable
+    # TPM and the initrd needs none, so it stays off. That was also forced
+    # before the P3 base switch -- the Gaokun defconfig left CONFIG_ACPI off, so
+    # TCG_CRB was never built and the modules-closure failed on tpm-crb -- but
+    # the base is now the kernel's own defconfig, which sets ACPI and builds
+    # TCG_CRB. What keeps the 90 s tpm2 wait away (nix/config/gaokun3-extra.nix)
+    # is TCG_TPM=m, which leaves /sys/class/tpmrm absent while generators run;
+    # this line additionally keeps the initrd from carrying a TPM core at all.
     boot.initrd.systemd.tpm2.enable = false;
     # ath11k's probe synchronously request_module()s the QRTR family
     # (net-pf-42) from an async workqueue while qrtr.ko depends on ath11k and

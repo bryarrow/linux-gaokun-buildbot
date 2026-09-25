@@ -58,32 +58,26 @@ in
       # them with `patch -p1`, the same content `git am` applies on the CI side.
       kernelPatches = basePatches ++ (args.kernelPatches or []);
 
-      # kernel.release is "7.2.0" + CONFIG_LOCALVERSION="-gaokun3".
+      # kernel.release is "7.2.0" + CONFIG_LOCALVERSION, which the extra config
+      # sets now that the base is the kernel's own defconfig rather than a
+      # Gaokun fragment.
       modDirVersion = "${pins.kernelVersion}-gaokun3";
-      defconfig = "gaokun3_defconfig";
 
-      # nixpkgs' common config now owns the distribution policy; the delta in
-      # nix/config/gaokun3-extra.nix re-asserts only what the hardware forces.
-      # gaokun3_defconfig stays the base for now, so Gaokun3 values that neither
-      # policy mentions survive. Moving the base to the kernel's own defconfig
-      # and deleting the fragment is a follow-up that needs the whole fragment
-      # reviewed against hardware.
+      # The kernel's own arm64 defconfig plus nixpkgs' common config is the
+      # distribution policy; nix/config/gaokun3-extra.nix is the reviewed
+      # Gaokun deviation. defconfig/gaokun3_defconfig is still copied into the
+      # tree (see postPatch) and still drives the Fedora pipeline, but the Nix
+      # kernel no longer selects it.
+      defconfig = "defconfig";
       enableCommonConfig = true;
       structuredExtraConfig = import ../../nix/config/gaokun3-extra.nix {inherit lib;};
 
-      # common-config.nix is written for the kernel nixpkgs ships, so against
-      # 7.2.0 some of its options cannot be used: 27 of them, most being other
-      # platforms' drivers under menus the Gaokun3 defconfig closes (RTW88,
-      # ROCKCHIP_*, SUN8I_*, ...), plus IMA, which was invisible only because
-      # this defconfig disabled INTEGRITY -- nix/config/gaokun3-extra.nix turns
-      # it back on -- and NVME_AUTH, where common config asks for "m" and the
-      # base has "y". None is a mistake in this tree, so the generate-config
-      # checks are warnings here; linux-rpi.nix does the same for the same
-      # reason. checks.config-symbols is the compensating control: it builds the
-      # configfile and asserts this delta actually landed, so a typo fails CI
-      # instead of becoming a warning nobody reads.
-      ignoreConfigErrors = true;
-
+      # generate-config.pl's checks stay at their defaults, so an option that
+      # does not land fails the build instead of vanishing into a log line.
+      # nix/config/gaokun3-extra.nix declares the one unreachable symbol (IMA,
+      # which INTEGRITY=n makes invisible) optional, which is what makes them
+      # pass; the pre-P3 base closed whole menus and needed linux-rpi.nix's
+      # ignoreConfigErrors to hide the resulting errors instead.
       extraMeta = {
         description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${pins.kernelVersion}";
         homepage = "https://github.com/bryarrow/linux-gaokun-buildbot";

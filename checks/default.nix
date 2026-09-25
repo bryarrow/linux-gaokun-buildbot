@@ -122,11 +122,11 @@ in {
       list: ${lib.concatStringsSep ", " firmwareNames}
     '';
 
-  # The kernel package turns generate-config.pl's fatal checks off, because
-  # against 7.2.0 some common-config options are unusable. That also silences
-  # errors in this repository's own delta, so this check puts the guarantee
-  # back: it builds the configfile -- minutes, not a kernel compile -- and
-  # asserts every delta entry and the assumptions behind them actually landed.
+  # generate-config.pl already fails the kernel build when a required option does
+  # not land, but it cannot see the values inherited from the arm64 defconfig,
+  # and nix/config/gaokun3-extra.nix declares one entry `optional`. This check
+  # builds the configfile -- minutes, not a kernel compile -- and asserts the
+  # delta and the assumptions behind it actually landed.
   #
   # The pull-request workflow builds this check explicitly, because
   # `nix flake check --no-build` only evaluates and would never catch a config
@@ -137,24 +137,33 @@ in {
     # nix/config/gaokun3-extra.nix
     grep -qx 'CONFIG_CMA_SIZE_MBYTES=128' "$cfg"
     grep -qx 'CONFIG_USB_PCI=y' "$cfg"
+    grep -qx 'CONFIG_BT_LE=y' "$cfg"
     grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
 
-    # INTEGRITY stays off, and with it IMA. Enabling it makes IMA select
-    # TCG_TPM, and a builtin TPM core makes systemd's tpm2 generator wait the
-    # full 90 s device timeout for a /dev/tpm0 that never appears on this
-    # machine (see nix/config/gaokun3-extra.nix). Both ends are asserted.
+    # TCG_TPM is pinned to a module and INTEGRITY stays off. A builtin TPM core
+    # makes /sys/class/tpmrm exist from boot, and systemd's tpm2 generator then
+    # waits the full 90 s device timeout for a /dev/tpm0 this machine cannot
+    # provide (see nix/config/gaokun3-extra.nix).
     grep -qx '# CONFIG_INTEGRITY is not set' "$cfg"
     grep -qx 'CONFIG_TCG_TPM=m' "$cfg"
+
+    # IMA is only reachable with INTEGRITY, so it must not be built. The
+    # fragment marks nixpkgs' unusable answer `optional` to keep it a warning;
+    # this is what makes sure the relaxation cannot become a silent "y".
+    if grep -q '^CONFIG_IMA=' "$cfg"; then
+      echo "IMA is built, which needs INTEGRITY and the builtin TPM core" >&2
+      exit 1
+    fi
 
     # Identity: the module directory and CONFIG_LOCALVERSION must agree.
     grep -qx 'CONFIG_LOCALVERSION="-gaokun3"' "$cfg"
 
-    # The tpm2 workaround in the module assumes this machine has no ACPI and so
-    # no CRB driver. If a future change builds one, revisit that workaround.
-    if grep -q '^CONFIG_TCG_CRB' "$cfg"; then
-      echo "TCG_CRB is built, but the tpm2 initrd workaround assumes it is not" >&2
-      exit 1
-    fi
+    # TCG_CRB is built now, because the kernel's own arm64 defconfig sets ACPI
+    # and the Gaokun defconfig did not. It cannot bind on this machine: the
+    # bootloader passes a real device tree, so `dt_is_stub()` is false and
+    # arch/arm64/kernel/acpi.c leaves ACPI disabled. The load-bearing guard
+    # stays TCG_TPM=m above -- a builtin TPM core is what put
+    # /sys/class/tpmrm in place before systemd's tpm2 generator ran.
 
     # CONFIG_LSM comes from the kernel default now; it must not name the
     # "integrity" LSM, which no longer exists in 7.2.
