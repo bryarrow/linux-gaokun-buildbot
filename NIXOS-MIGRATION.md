@@ -1,9 +1,9 @@
 # 将 NixOS 升为主产物的迁移设计
 
-状态：**P0、P1 已实现；P2 部分完成；P3–P6 待做。** 实现进展与偏差见 §11。
+状态：**P0–P2 已实现；P3–P6 待做。** 实现进展与偏差见 §11。
 决策依据 revision：`a64790e`（`gaokun3-nix-debug`）。
 实现起点：P0 = `9013b9a1`，P1 = `db75b4fa`，缓存补 `modules` = `9bfa8883`，
-内核改用 flake 自己的 nixpkgs = `fcf63bf5`。
+内核改用 flake 自己的 nixpkgs = `fcf63bf5`，P2 = `f9fc6b28`。
 正文（§1–§10）保持评审时的原样，未随实现回写；两者不一致之处由 §11 记录。
 
 > 放置说明：`README.md` 与 `docs/*.md` 面向"想把机器刷起来/修好"的机主（见 `CLAUDE.md` 的 Audience split），
@@ -667,7 +667,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 | --- | --- | --- |
 | P0 供应链与不变量 | 已完成，逐项验证 | `9013b9a1` |
 | P1 CI 与二进制缓存 | 代码已完成（`9bfa8883` 补上内核 `modules` 输出）；用户侧待办见 11.4 | `db75b4fa` |
-| P2 包与模块架构 | 部分完成：overlay 与模块改用 `pkgs.*`（见 11.2 第 9 条）；alsa 包、meta、`packages.default` 等待做 | `fcf63bf5` |
+| P2 包与模块架构 | 已完成（overlay、alsa 包、`pkgs.*`、`mkBefore`、meta、`packages.default`） | `f9fc6b28` |
 | P3 内核配置收敛 | 未开始（需实机冷启动验证） | — |
 | P4 EL2 变体 | 未开始 | — |
 | P5 文档与叙事反写 | 未开始 | — |
@@ -711,6 +711,13 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     只构建并推送了内核的 `out`，`modules`（system closure 与 initramfs 需要）从未构建，
     设备即使替换了镜像仍要整编。现已显式引用 `linux-gaokun3.modules`（`9bfa8883`）。这也是
     官方缓存里 `out`/`modules`/`dev` 齐全的原因：Hydra realise 整条 derivation。
+11. **§5.9 的固件优先级方向写反。** nixpkgs 的 `hardware.firmware` 文档与 `buildEnv`
+    （`ignoreCollisions = true`）都规定**列表中第一个包胜出**；原设计建议 `lib.mkAfter`，
+    那会把 gaokun3 排到 linux-firmware 之后，反而让后者胜出。实现用 `lib.mkBefore`
+    （`f9fc6b28`），`checks.firmware-precedence` 负向测试（换成 `mkAfter` 即报错）已验证。
+12. **tools 包的许可无法确认。** `patch-nvm-bdaddr.py` 上游（whitelewi1-ctrl）是 GPL-2.0，
+    而 `chiyuki0325/EGoTouchRev-Linux` 没有 license 文件（GitHub license API 404）。因此
+    `meta.license = gpl2Plus` 对组合作品并不成立，先保留并留待维护者裁定，未擅自改许可。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -726,6 +733,11 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
   仍是 `w674i7r…`（改前为 `g2sa2ww1…`），即只由 flake 的 commit 决定。
 - 缓存覆盖：`w674i7r…-linux-gaokun3-7.2.0` present，`99bqx8c4…-modules` 在 `9bfa8883`
   之前 MISS，已由 `checks.packages` 显式引用后交给 CI 补齐。
+- P2 验证：`nix flake check --all-systems` 与全部 check 构建通过；新增的
+  `alsa-ucm-conf-gaokun3`、重写的 firmware（`0.1.0-5wp9jc4`，版本由固件树内容哈希派生）、
+  tools 均可构建；tools 的 `postPatch` 替换出现在 `.patch-nvm-bdaddr.py-wrapped`；
+  UCM 包的 `sc8280xp.conf` 与 `tools/audio/sc8280xp.conf` 一致；`nix build .` 现在产出
+  firmware 而非内核；`firmware-precedence` 用 `mkAfter` 负向测试确认会失败。
 
 ### 11.4 待办（用户侧）
 
@@ -737,3 +749,5 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 4. §5.13 的 tag 化：宿主已改为跟 `main`，但仍是一个可变分支，需要一个不可变 tag。
 5. CI 跑过一次后，用 `nix path-info --store https://gaokun3.cachix.org <kernel-path>`
    确认 `out` 与 `modules` 都命中。
+6. 裁定 tools 包的 `meta.license`：`chiyuki0325/EGoTouchRev-Linux` 未声明许可，需要
+   维护者确认，或在包内注明来源与授权状态。
