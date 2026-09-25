@@ -2,7 +2,7 @@
   description = "NixOS support for the Huawei MateBook E Go 2023 (gaokun3 / Qualcomm SC8280XP)";
 
   # Honoured only when this flake is the top-level flake, e.g. a direct
-  # `nix build github:KawaiiHachimi/linux-gaokun-buildbot` (which needs
+  # `nix build github:bryarrow/linux-gaokun-buildbot` (which needs
   # --accept-flake-config unless the user is trusted). Someone who takes this
   # as an input has to configure the cache themselves, through the module's
   # hardware.gaokun3.binaryCache or nix.conf; see README.
