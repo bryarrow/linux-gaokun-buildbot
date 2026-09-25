@@ -208,10 +208,19 @@ in {
           # The kernel loads .zst transparently, but the patcher needs the
           # bytes, so put an uncompressed copy in the writable directory that
           # firmware_class.path makes it prefer.
+          #
+          # readlink -f is load-bearing. /run/current-system/firmware is a
+          # symlink farm, and with hardware.firmwareCompression the compressed
+          # name is itself a link to the vendor variant
+          # (wcnhpnv21g.bin.zst -> wcnhpnv21g.b9f.zst). zstd refuses to read a
+          # symlink -- "Warning : ... is a symbolic link, ignoring", exit 1 --
+          # so this unit failed on every boot and Bluetooth kept the NVM's
+          # placeholder 00:00:00:00:5A:AD instead of the per-device address the
+          # patcher derives from the DMI serial.
           if [ -f "$base" ]; then
-            cp -f "$base" "$dst/wcnhpnv21g.bin"
+            cp -fL "$base" "$dst/wcnhpnv21g.bin"
           elif [ -f "$base.zst" ]; then
-            zstd -d -c "$base.zst" > "$dst/wcnhpnv21g.bin"
+            zstd -d -c "$(readlink -f "$base.zst")" > "$dst/wcnhpnv21g.bin"
           else
             echo "no QCA NVM firmware to patch" >&2
             exit 0
