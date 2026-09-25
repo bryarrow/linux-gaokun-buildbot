@@ -2,16 +2,21 @@
 #
 # P3 turns on nixpkgs' common config
 # (pkgs/os-specific/linux/kernel/common-config.nix), which now owns the
-# distribution policy. This file re-asserts only what the hardware forces.
-# Keys are kernel_config.nix settings -- tristate / freeform / optional -- not
-# raw CONFIG_ lines.
+# distribution policy. This file re-asserts only what the hardware or an
+# explicit decision forces. Keys are kernel_config.nix settings -- tristate /
+# freeform / optional -- not raw CONFIG_ lines.
 #
 # The base is still defconfig/gaokun3_defconfig, so a symbol neither nixpkgs nor
 # this file mentions keeps its Gaokun3 value. Comparing that defconfig against
-# the common config left twelve real conflicts (both sides set a different
-# value); all but CMA_SIZE_MBYTES are inherited, which is what drops the
-# divergences the Fedora audit listed -- LSM order, preemption, tracing and
-# whole driver families are nixpkgs' decisions now.
+# the common config left twelve real conflicts; all but CMA_SIZE_MBYTES are
+# inherited, and the divergences the Fedora audit listed -- tracing and whole
+# driver families -- are nixpkgs' decisions now.
+#
+# The kernel package disables generate-config.pl's fatal checks because against
+# 7.2.0 some common-config options are unused. checks.config-symbols is what
+# puts a guarantee back: it builds the configfile and asserts every entry below
+# (and the other deltas) actually landed, so a typo or an invisible symbol fails
+# CI instead of silently doing nothing.
 {lib}: let
   # common-config.nix defines its options at priority 100, so overriding one
   # takes a lower priority number. 90 leaves mkForce (50) free for a user who
@@ -27,6 +32,13 @@ in {
   # defconfig had it off. Turning it on is what lets
   # boot.initrd.includeDefaultModules go back to its default.
   USB_PCI = {tristate = "y";};
+
+  # common-config.nix asks for IMA, which is only visible under INTEGRITY. The
+  # upstream arm64 defconfig leaves INTEGRITY at its default "y"; the Gaokun3
+  # fragment disabled it, so IMA was dropped. IMA and EVM carry
+  # order = LSM_ORDER_LAST and security/Kconfig says those are always enabled
+  # once selected, so this does not depend on CONFIG_LSM.
+  INTEGRITY = {tristate = "y";};
 
   # v7.2 guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and the sm8250
   # tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS, while

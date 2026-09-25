@@ -75,13 +75,13 @@ in
 
     meta = {
       description = "Bluetooth NVM patcher and touchscreen tuner for the Huawei MateBook E Go 2023";
-      homepage = "https://github.com/KawaiiHachimi/linux-gaokun-buildbot";
+      homepage = "https://github.com/bryarrow/linux-gaokun-buildbot";
       mainProgram = "touchscreen-tune";
-      # patch-nvm-bdaddr.py comes from whitelewi1-ctrl/matebook-e-go-linux,
-      # which is GPL-2.0. The tuner comes from chiyuki0325/EGoTouchRev-Linux,
-      # which declares no license file at all, so this expression is not
-      # confirmed for the combined work.
-      license = lib.licenses.gpl2Plus;
+      # No license field on purpose. patch-nvm-bdaddr.py comes from
+      # whitelewi1-ctrl/matebook-e-go-linux, which is GPL-2.0, but the tuner's
+      # upstream (chiyuki0325/EGoTouchRev-Linux) declares no license file at
+      # all, so no single SPDX identifier is true for the combined work. Saying
+      # nothing is honest; a maintainer decision is still owed.
       platforms = lib.platforms.linux;
     };
   }

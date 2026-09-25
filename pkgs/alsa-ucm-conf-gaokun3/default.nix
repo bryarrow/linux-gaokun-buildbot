@@ -33,7 +33,7 @@ stdenvNoCC.mkDerivation {
 
   meta = {
     description = "ALSA UCM2 configuration for the Huawei MateBook E Go 2023 (gaokun3)";
-    homepage = "https://github.com/KawaiiHachimi/linux-gaokun-buildbot";
+    homepage = "https://github.com/bryarrow/linux-gaokun-buildbot";
     # The bulk is alsa-ucm-conf's BSD-3-Clause tree; sc8280xp.conf comes from
     # the same source as the module's audio configuration.
     license = [lib.licenses.bsd3 lib.licenses.gpl2Only];

@@ -29,7 +29,7 @@ in
 
     meta = {
       description = "Model-specific firmware for the Huawei MateBook E Go 2023 (gaokun3)";
-      homepage = "https://github.com/KawaiiHachimi/linux-gaokun-buildbot";
+      homepage = "https://github.com/bryarrow/linux-gaokun-buildbot";
       license = lib.licenses.unfreeRedistributable;
       platforms = lib.platforms.linux;
     };
