@@ -125,6 +125,25 @@ it under a stock `nixpkgs.config.allowUnfree = false`; allow it explicitly:
   ]; }
 ```
 
+### EL2 variant (experimental)
+
+By default Linux takes the machine over. There is a second kernel that runs
+Linux as a guest on the vendor hypervisor instead, the same one the legacy
+Fedora pipeline ships as `kernel-gaokun3-el2`:
+
+```nix
+{ hardware.gaokun3.el2.enable = true; }
+```
+
+It switches `boot.kernelPackages` to `pkgs.linuxPackages_gaokun3-el2`, boots
+`sc8280xp-huawei-gaokun3-el2.dtb`, and adds that entry's kernel command line
+(`modprobe.blacklist=simpledrm`). This path is experimental and is not a
+supported configuration, which is why it is off by default.
+
+The EL2 EFI payloads under `tools/el2/` are still installed by the Fedora image
+only, so a device that needs them on its ESP has to be set up by hand; see the
+migration notes.
+
 ### Binary cache
 
 The project publishes its kernel and firmware builds to a public Cachix cache,

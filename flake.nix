@@ -54,6 +54,7 @@
 
     packages = forAllSystems (system: {
       linux-gaokun3 = (kernelPkgsFor system).callPackage ./pkgs/linux-gaokun3 {};
+      linux-gaokun3-el2 = (kernelPkgsFor system).callPackage ./pkgs/linux-gaokun3-el2 {};
       firmware-gaokun3 = (pkgsFor system).callPackage ./pkgs/firmware-gaokun3 {};
       tools-gaokun3 = (pkgsFor system).callPackage ./pkgs/tools-gaokun3 {};
       alsa-ucm-conf-gaokun3 = (pkgsFor system).callPackage ./pkgs/alsa-ucm-conf-gaokun3 {};

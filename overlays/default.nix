@@ -6,6 +6,8 @@
 {self}: final: prev: {
   linux-gaokun3 = self.packages.${prev.system}.linux-gaokun3;
   linuxPackages_gaokun3 = prev.linuxPackagesFor final.linux-gaokun3;
+  linux-gaokun3-el2 = self.packages.${prev.system}.linux-gaokun3-el2;
+  linuxPackages_gaokun3-el2 = prev.linuxPackagesFor final.linux-gaokun3-el2;
   linux-firmware-gaokun3 = self.packages.${prev.system}.firmware-gaokun3;
   gaokun3-tools = self.packages.${prev.system}.tools-gaokun3;
   alsa-ucm-conf-gaokun3 = self.packages.${prev.system}.alsa-ucm-conf-gaokun3;

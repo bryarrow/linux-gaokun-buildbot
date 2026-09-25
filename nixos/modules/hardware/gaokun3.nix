@@ -61,17 +61,37 @@
     "fbcon=rotate:1"
     "usbhid.quirks=0x12d1:0x10b8:0x20000000"
     "plymouth.enable=0"
-  ];
+  ]
+  # The Fedora image adds this to its EL2 entry and to nothing else
+  # (50_make_image_fedora.sh). What it fixes is not recorded anywhere in this
+  # tree, so it is reproduced as-is; NIXOS-MIGRATION.md 11.4 lists what a boot
+  # of the variant would have to show to settle it.
+  ++ lib.optional cfg.el2.enable "modprobe.blacklist=simpledrm";
 in {
   options.hardware.gaokun3 = {
     enable = lib.mkEnableOption ''
       support for the Huawei MateBook E Go 2023 (gaokun3 / Qualcomm SC8280XP)
     '';
 
+    el2.enable = lib.mkEnableOption ''
+      the experimental EL2 variant, where Linux runs as a guest on the vendor
+      hypervisor instead of taking the machine over. It selects
+      pkgs.linuxPackages_gaokun3-el2, the matching device tree and that entry's
+      kernel command line; it is not a supported configuration, so it is off by
+      default
+    '';
+
     kernelPackages = lib.mkOption {
       type = lib.types.unspecified;
-      default = pkgs.linuxPackages_gaokun3;
-      defaultText = lib.literalExpression "pkgs.linuxPackages_gaokun3";
+      default =
+        if cfg.el2.enable
+        then pkgs.linuxPackages_gaokun3-el2
+        else pkgs.linuxPackages_gaokun3;
+      defaultText = lib.literalExpression ''
+        if config.hardware.gaokun3.el2.enable
+        then pkgs.linuxPackages_gaokun3-el2
+        else pkgs.linuxPackages_gaokun3
+      '';
       description = "The gaokun3 kernel package set to boot with.";
     };
 
@@ -110,7 +130,11 @@ in {
 
     hardware.deviceTree = {
       enable = true;
-      name = "qcom/sc8280xp-huawei-gaokun3.dtb";
+      # The kernel builds <board>-el2.dtb by applying sc8280xp-el2.dtbo to the
+      # board tree (arch/arm64/boot/dts/qcom/Makefile), so the variant needs no
+      # extra source here -- only this name, and it has to match the kernel
+      # package, which is why both follow el2.enable.
+      name = "qcom/sc8280xp-huawei-gaokun3" + lib.optionalString cfg.el2.enable "-el2" + ".dtb";
     };
 
     # WCN6855, QCA Bluetooth and Adreno 660 firmware come from linux-firmware,

@@ -60,24 +60,37 @@ in {
   # The module is aarch64-only — it selects an aarch64 kernel and a device
   # tree — so this is the only system whose toplevel can be evaluated. Build it
   # once and reuse it for the checks below.
+  baseModules = [
+    self.nixosModules.gaokun3
+    {
+      hardware.gaokun3.enable = true;
+      nixpkgs.config.allowUnfreePredicate = allowUnfreePredicate;
+      # Just enough of a system for the toplevel assertions to pass. The
+      # device boots through systemd-boot, see README.
+      boot.loader.systemd-boot.enable = true;
+      fileSystems."/" = {
+        device = "/dev/disk/by-label/nixos";
+        fsType = "ext4";
+      };
+      system.stateVersion = "26.11";
+    }
+  ];
+
   evaluated = lib.nixosSystem {
     system = "aarch64-linux";
-    modules = [
-      self.nixosModules.gaokun3
-      {
-        hardware.gaokun3.enable = true;
-        nixpkgs.config.allowUnfreePredicate = allowUnfreePredicate;
-        # Just enough of a system for the toplevel assertions to pass. The
-        # device boots through systemd-boot, see README.
-        boot.loader.systemd-boot.enable = true;
-        fileSystems."/" = {
-          device = "/dev/disk/by-label/nixos";
-          fsType = "ext4";
-        };
-        system.stateVersion = "26.11";
-      }
-    ];
+    modules = baseModules;
   };
+
+  # The same system with the experimental variant on, so the option's wiring is
+  # checked here rather than on the first device that turns it on.
+  el2Evaluated = lib.nixosSystem {
+    system = "aarch64-linux";
+    modules = baseModules ++ [{hardware.gaokun3.el2.enable = true;}];
+  };
+
+  el2KernelName = lib.getName el2Evaluated.config.boot.kernelPackages.kernel;
+  el2DeviceTree = el2Evaluated.config.hardware.deviceTree.name;
+  simpledrmBlacklisted = params: lib.elem "modprobe.blacklist=simpledrm" params;
 
   # `hardware.firmware` builds a buildEnv with ignoreCollisions, and the winner
   # of a name present in several packages is decided by priority first and by
@@ -107,6 +120,7 @@ in {
   toplevel = builtins.unsafeDiscardStringContext evaluated.config.system.build.toplevel.drvPath;
 
   kernel = self.packages.${system}.linux-gaokun3;
+  el2Kernel = self.packages.${system}.linux-gaokun3-el2;
 in {
   eval = pkgs.runCommand "gaokun3-eval" {} ''
     echo ${toplevel} > $out
@@ -120,6 +134,25 @@ in {
       priorities gaokun3=${toString firmwarePriorities.gaokun3} stock=${toString firmwarePriorities.stock},
       order gaokun3=${toString gaokun3Index} stock=${toString stockIndex},
       list: ${lib.concatStringsSep ", " firmwareNames}
+    '';
+
+  # hardware.gaokun3.el2.enable has to move three things at once -- the kernel
+  # package, the device tree the boot entry passes, and that entry's command
+  # line -- and the base system has to keep all three. Comparing the two
+  # evaluations catches a switch that forgets one, without building a kernel.
+  el2-wiring =
+    if el2KernelName == "linux-gaokun3-el2"
+    && el2DeviceTree == "qcom/sc8280xp-huawei-gaokun3-el2.dtb"
+    && simpledrmBlacklisted el2Evaluated.config.boot.kernelParams
+    && !simpledrmBlacklisted evaluated.config.boot.kernelParams
+    && lib.getName evaluated.config.boot.kernelPackages.kernel == "linux-gaokun3"
+    then pkgs.runCommand "gaokun3-el2-wiring" {} "touch $out"
+    else throw ''
+      hardware.gaokun3.el2.enable did not switch everything it owns:
+        kernel: ${el2KernelName} (want linux-gaokun3-el2)
+        device tree: ${el2DeviceTree} (want qcom/sc8280xp-huawei-gaokun3-el2.dtb)
+        base kernel: ${lib.getName evaluated.config.boot.kernelPackages.kernel} (want linux-gaokun3)
+        simpledrm blacklisted: el2=${lib.boolToString (simpledrmBlacklisted el2Evaluated.config.boot.kernelParams)}, base=${lib.boolToString (simpledrmBlacklisted evaluated.config.boot.kernelParams)} (want true/false)
     '';
 
   # generate-config.pl already fails the kernel build when a required option does
@@ -173,6 +206,20 @@ in {
       exit 1
     fi
 
+    # The EL2 variant is a variant, not a second distribution: patches/el2
+    # changes no Kconfig file, so its config may differ from the base in
+    # CONFIG_LOCALVERSION alone. A patch that starts carrying policy, or a
+    # LOCALVERSION that drifts from the module directory, fails here.
+    el2=${el2Kernel.configfile}
+    grep -qx 'CONFIG_LOCALVERSION="-gaokun3-el2"' "$el2"
+    if ! diff -q <(grep -v '^CONFIG_LOCALVERSION=' "$cfg") \
+                 <(grep -v '^CONFIG_LOCALVERSION=' "$el2") > /dev/null; then
+      echo "the EL2 kernel config differs from the base beyond LOCALVERSION:" >&2
+      diff <(grep -v '^CONFIG_LOCALVERSION=' "$cfg") \
+           <(grep -v '^CONFIG_LOCALVERSION=' "$el2") >&2 || true
+      exit 1
+    fi
+
     touch $out
   '';
 
@@ -187,6 +234,9 @@ in {
   # x86_64 packages are deliberately not part of it.
   packages = pkgs.linkFarm "gaokun3-packages" (
     lib.mapAttrsToList (name: path: {inherit name path;}) self.packages.${system}
-    ++ [{name = "linux-gaokun3-modules"; path = kernel.modules;}]
+    ++ [
+      {name = "linux-gaokun3-modules"; path = kernel.modules;}
+      {name = "linux-gaokun3-el2-modules"; path = el2Kernel.modules;}
+    ]
   );
 })
