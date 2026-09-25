@@ -735,7 +735,8 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     平台的驱动，其父 menu 被 gaokun3_defconfig 关掉（`RTW88`、`ROCKCHIP_*`、`SUN8I_*`……），
     外加 `IMA`、以及 `NVME_AUTH`（common 要 `m`、基底是 `y`）。**`IMA` 不是"别的平台的驱动"**：
     common config 要求 `IMA = yes`，它只是因为 defconfig 写了 `# CONFIG_INTEGRITY is not set`
-    而不可见（上游 arm64 defconfig 没有这一行），处理见第 17 条。其余不是本树的错误，因此设
+    而不可见（上游 arm64 defconfig 没有这一行）。曾因此开启 `INTEGRITY`，后因 90 秒启动回归撤销，
+    经过见第 22 条。其余不是本树的错误，因此设
     `ignoreConfigErrors = true`（`3844f77b`），与 `linux-rpi.nix` 同理；代价由
     `checks.config-symbols`（第 20 条）补回。
 16. **`tpm2.enable = false` 不能删。** 设计 §6 P3 把它列为要删除的补偿之一，但本机是**设备树
@@ -744,15 +745,11 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
     依据是**现行内核实测**：`/run/current-system/kernel`（P3 前的 `w674i7r…`）的 modules 里有
     `tpm_tis.ko`/`tpm_ftpm_tee.ko`、没有 `tpm_crb.ko`；不是 P3 的实机验证（尚无该 generation）。
     P3 真正删掉的只有 `includeDefaultModules = false`。
-17. **开 `INTEGRITY`，并删掉 defconfig 的 `CONFIG_LSM`。** common config 要 `IMA = yes`，而 `IMA`
-    只在 `INTEGRITY` 下可见；上游 arm64 defconfig 让 `INTEGRITY` 取默认 `y`，是 Gaokun 片段把它
-    关掉的，delta 因此增加 `INTEGRITY = {tristate = "y";}`。同时按决定从
-    `defconfig/gaokun3_defconfig` 删除 `CONFIG_LSM="…"`（该串里的 `integrity` 在 7.2 已不是 LSM），
-    改用内核默认：实测得到
-    `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
-    ——**AppArmor 因此才真正进入列表**（旧串里没有它）。IMA/EVM 带 `order = LSM_ORDER_LAST`，
-    `security/Kconfig:279` 说这类"只要编入就始终启用"，所以不依赖 `CONFIG_LSM`。
-    注意 `defconfig/` 与 Fedora 流水线共用，这次改动同样作用于 Fedora 侧。
+17. **删掉 defconfig 的 `CONFIG_LSM`。** 该串里写的 `integrity` 在 7.2 已不是 LSM，且非默认
+    `CONFIG_LSM` 会覆盖 `DEFAULT_SECURITY_*`，所以旧的那行既过时又让默认选择失效。改用内核默认：
+    实测得到 `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
+    ——**AppArmor 因此才真正进入列表**（旧串里没有它）。注意 `defconfig/` 与 Fedora 流水线共用，
+    这次改动同样作用于 Fedora 侧。
 18. **调试信息改用 nixpkgs 策略。** common config 打开 `DEBUG_INFO=y` +
     `DEBUG_INFO_DWARF_TOOLCHAIN_DEFAULT=y` + `DEBUG_INFO_BTF(_MODULES)=y`（P3 前是
     `DEBUG_INFO_NONE=y`）。安装时会 strip、`-dev` 又被 pushFilter 排除，缓存体积增长有限，但
@@ -761,13 +758,31 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 19. **`CONFIG_RUST=y`。** common config 在 aarch64 + ≥6.12 + rustc 可用时开 `RUST`；新配置确认
     为 `y`，内核构建因此需要 rustc/bindgen，并有 `RUST_IS_AVAILABLE` 断言与额外时长。
 20. **新增 `checks.config-symbols`，PR 也构建它。** 它构建 configfile（分钟级，不编译内核）并
-    断言 delta 的每一条、`CONFIG_LOCALVERSION`、`IMA`/`INTEGRITY`、无 `TCG_CRB`、`CONFIG_LSM`
-    不再含 `integrity`。这样 `ignoreConfigErrors` 的降级被补回可控保证，配置类回归在 PR 就拦住
-    （此前 PR 只 `--no-build`）。
+    断言 delta 的每一条、`CONFIG_LOCALVERSION`、`INTEGRITY` 未开、`TCG_TPM=m`、无 `TCG_CRB`、
+    `CONFIG_LSM` 不再含 `integrity`。这样 `ignoreConfigErrors` 的降级被补回可控保证，配置类
+    回归在 PR 就拦住（此前 PR 只 `--no-build`）。
 21. **仓库 URL 统一到 `bryarrow/linux-gaokun-buildbot`**（README 的 flake input/release/
     `nix build` 三处与 4 个包的 `meta.homepage`），与 git remote、宿主 flake 实际拉取一致。
     CI action 仍是可变 tag（`checkout@v6`、`install-nix-action@v31`、`cachix-action@v17`），与仓库
     其它 workflow 风格一致，暂不 pin 到 SHA。
+22. **`INTEGRITY` 曾按第 15 条开启，因 90 秒启动回归撤销。** 链条每一环都已实测：
+    `INTEGRITY=y` + common config 的 `IMA = yes` → `security/integrity/ima/Kconfig:12` 的
+    `select TCG_TPM if HAS_IOMEM` 把 `CONFIG_TCG_TPM` 从 autoModules 的 `m` 变成 **`y`（内建）**
+    → `/sys/class/tpmrm` 开机即存在（空）→ systemd `tpm2_support_full()` 置
+    `TPM2_SUPPORT_SUBSYSTEM`，`efi_has_tpm2()` 又因固件给了 `TPMEventLog=0xfff64018` 为真 →
+    `systemd-tpm2-generator` 把 `tpm2.target`（`Wants=dev-tpm0.device dev-tpmrm0.device`）
+    挂进 `sysinit.target.wants` → 设备不存在，走满 90 秒设备超时。
+    实测：旧内核（`TCG_TPM=m`）userspace 2.7–3.5 s、总启动 15–17 s；新内核 userspace
+    **91.8 s**、总启动 1 min 46 s；`/proc/config.gz` 为 `TCG_TPM=y`/`INTEGRITY=y`/`IMA=y`。
+    这台机器在 Linux 下没有可用 TPM（DT 启动、无 `microsoft,ftpm` 节点、`tpm_ftpm_tee` 未绑定），
+    IMA 本来就在 TPM-bypass，等这 90 秒换不到任何东西，因此撤销 delta 里的 `INTEGRITY` 条目，
+    并在 `checks.config-symbols` 里把"`INTEGRITY` 未开、`TCG_TPM=m`"钉死。
+23. **`patch-nvm-bdaddr.service` 的既有 bug 一并修掉。** 它自本模块写就起就没成功过
+    （boot -1/-2/-3 同样失败）：`ConditionPathExists` 被放进 `serviceConfig`，systemd 报
+    `Unknown key 'ConditionPathExists' in section [Service], ignoring` 于是一直无条件运行；
+    而 `hardware.firmware` 在 ≥5.19 上压缩成 `.zst`，脚本 `cp` 的 `wcnhpnv21g.bin` 根本不存在。
+    修法：条件移到 `unitConfig`，脚本按实际存在的 `.bin`/`.bin.zst` 取源，`.zst` 用 `zstd -d`
+    解压到可写目录再 patch，`path` 加上 `pkgs.zstd`。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -797,12 +812,16 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
   也都在。与 P3 前的配置逐符号 diff：**没有硬件驱动丢失**。差异分三类：
   1. nixpkgs 策略：抢占变 `PREEMPT_LAZY`、`NO_HZ_FULL`（取代 `NO_HZ_IDLE`）、`CONFIG_RUST=y`、
      `DEBUG_INFO`+`DWARF`+`BTF`、autoModules 之前打开的 KUNIT/自测模块被关掉；
-  2. 本轮决定：`INTEGRITY=y`（连带 `IMA=y`）、`CONFIG_LSM` 改用内核默认
+  2. 本轮决定：`CONFIG_LSM` 改用内核默认
      `landlock,lockdown,yama,loadpin,safesetid,selinux,smack,tomoyo,apparmor,ipe,bpf`
      （旧串只有 `selinux`，**没有 `apparmor`**；又因非默认 `CONFIG_LSM` 会覆盖
      `DEFAULT_SECURITY_*`，"LSM 默认变 AppArmor"那句原本无效）；
   3. 无实际影响：`SND_AC97_POWER_SAVE`（`depends on SND_AC97_CODEC`，与 `SND_PCI` 无关）、
      `HID_PICOLCD_*` 之类。
+- TPM 回归的实测（见 11.2 第 22 条）：同一固件、同一 systemd/配置，仅换内核，启动从 15–17 s
+  变成 1 min 46 s；`/proc/config.gz` 的 `TCG_TPM` 由 `m` 变 `y`。撤销 `INTEGRITY` 后重跑
+  configfile（`84cd8pnd…`）确认回到 `TCG_TPM=m`、`# CONFIG_INTEGRITY is not set`，delta 其余
+  （`CMA_SIZE_MBYTES=128`、`USB_PCI=y`、IRIS 未设）不变。
 - 新增的 `checks.config-symbols` 与 priority-aware 的 `checks.firmware-precedence` 均构建通过；
   `nix flake check --no-build --all-systems` 全绿。
 
@@ -819,9 +838,10 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 6. （字段已移除）tools 包的 `meta.license` 已删掉、只留注释；将来若要写，需要先确认
    `chiyuki0325/EGoTouchRev-Linux` 的授权状态。
 7. **实机冷启动验证 P3，并观察这些行为差异**：`includeDefaultModules` 删除后的
-   modules-closure/initrd、`NO_HZ_FULL` 取代 `NO_HZ_IDLE` 后的功耗与计时、`INTEGRITY`/`IMA`
-   与新的 `CONFIG_LSM`。CI 只构建内核，这些都测不到。失败就回滚到 P2：
-   `boot.loader.systemd-boot.configurationLimit = 5` 已留有旧 generation。验证通过后再考虑
-   把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
+   modules-closure/initrd、`NO_HZ_FULL` 取代 `NO_HZ_IDLE` 后的功耗与计时、新的 `CONFIG_LSM`。
+   TPM 那 90 秒已在撤销 `INTEGRITY` 后消失，重启时应确认总启动回到 ~15 s；蓝牙侧确认
+   `patch-nvm-bdaddr.service` 成功且 `bluetooth.service` 拿到 patch 后的 BDADDR。CI 只构建内核，
+   这些都测不到。失败就回滚到 P2：`boot.loader.systemd-boot.configurationLimit = 5` 已留有旧
+   generation。验证通过后再考虑把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
 8. 按新配置（`DEBUG_INFO`+`BTF`）重新量一次内核 `out`/`modules` 的压缩体积，更新 §5.11.5 与
    README 关于 5 GB 配额的估计。
