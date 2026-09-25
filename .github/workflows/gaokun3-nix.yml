@@ -1,6 +1,7 @@
 # The main CI for the NixOS side. It evaluates on pull requests and builds +
-# pushes to the project cache on main, which is what keeps devices from
-# compiling the kernel locally. The Fedora workflows are separate and frozen.
+# pushes to the project cache on the branches below, which is what keeps
+# devices from compiling the kernel locally. The Fedora workflows are separate
+# and frozen.
 #
 # The runner has to be arm64: linux-gaokun3's meta.platforms is aarch64, so an
 # x86_64 runner either skips its checks or cross-compiles under emulation.
@@ -10,7 +11,8 @@ on:
   workflow_dispatch:
   pull_request:
   push:
-    branches: [main]
+    # main is the release branch; gaokun3-nix is where this work lands first.
+    branches: [main, gaokun3-nix]
     paths:
       - '**.nix'
       - 'flake.lock'
