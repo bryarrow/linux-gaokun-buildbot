@@ -1,9 +1,9 @@
 # 将 NixOS 升为主产物的迁移设计
 
-状态：**P0–P2 已实现；P3–P6 待做。** 实现进展与偏差见 §11。
+状态：**P0–P2 已实现；P3 代码已完成、待实机冷启动验证；P4–P6 待做。** 实现进展与偏差见 §11。
 决策依据 revision：`a64790e`（`gaokun3-nix-debug`）。
 实现起点：P0 = `9013b9a1`，P1 = `db75b4fa`，缓存补 `modules` = `9bfa8883`，
-内核改用 flake 自己的 nixpkgs = `fcf63bf5`，P2 = `f9fc6b28`。
+内核改用 flake 自己的 nixpkgs = `fcf63bf5`，P2 = `f9fc6b28`，P3 = `da1d7b36`。
 正文（§1–§10）保持评审时的原样，未随实现回写；两者不一致之处由 §11 记录。
 
 > 放置说明：`README.md` 与 `docs/*.md` 面向"想把机器刷起来/修好"的机主（见 `CLAUDE.md` 的 Audience split），
@@ -668,7 +668,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 | P0 供应链与不变量 | 已完成，逐项验证 | `9013b9a1` |
 | P1 CI 与二进制缓存 | 代码已完成（`9bfa8883` 补上内核 `modules` 输出）；用户侧待办见 11.4 | `db75b4fa` |
 | P2 包与模块架构 | 已完成（overlay、alsa 包、`pkgs.*`、`mkBefore`、meta、`packages.default`） | `f9fc6b28` |
-| P3 内核配置收敛 | 未开始（需实机冷启动验证） | — |
+| P3 内核配置收敛 | 代码已完成，待实机冷启动验证（见 11.2 第 13、14 条） | `da1d7b36` |
 | P4 EL2 变体 | 未开始 | — |
 | P5 文档与叙事反写 | 未开始 | — |
 | P6 NixOS 安装介质 | 未开始（Fedora 能否退役的前提） | — |
@@ -718,6 +718,16 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
 12. **tools 包的许可无法确认。** `patch-nvm-bdaddr.py` 上游（whitelewi1-ctrl）是 GPL-2.0，
     而 `chiyuki0325/EGoTouchRev-Linux` 没有 license 文件（GitHub license API 404）。因此
     `meta.license = gpl2Plus` 对组合作品并不成立，先保留并留待维护者裁定，未擅自改许可。
+13. **P3 的基底暂时仍是 `gaokun3_defconfig`。** 设计 §5.4 的终点是 `defconfig = "defconfig"`
+    加一份经审查的 Gaokun 片段。把 defconfig 与 nixpkgs `common-config.nix` 的**显式**符号集
+    比对后，真正"两边都设了但值不同"的只有 12 个（LSM order、preemption、tracing、驱动家族
+    这些并不是冲突，只是 common config 不设，会自动继承 nixpkgs/autoModules 的缺省）。
+    因此本轮先开启 `enableCommonConfig` 并保留 defconfig 作为基底：既拿到 nixpkgs 策略，
+    又让"两个策略都没提到"的 Gaokun 值原样保留，风险最小。把基底换成 `defconfig` 并删除
+    defconfig 需要逐符号重审整份片段，留待实机迭代。
+14. **覆盖 common config 需要显式优先级。** `common-config.nix` 的选项是优先级 100 的普通
+    定义，同优先级的第二个定义会直接报冲突（`CMA_SIZE_MBYTES` 实测）。`nix/config/gaokun3-extra.nix`
+    用 `lib.mkOverride 90` 覆盖，并保留 `mkForce`(50) 给用户——与 `zen-kernels.nix` 同一惯例。
 
 ### 11.3 验证记录（本机 aarch64 原生）
 
@@ -738,6 +748,10 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
   tools 均可构建；tools 的 `postPatch` 替换出现在 `.patch-nvm-bdaddr.py-wrapped`；
   UCM 包的 `sc8280xp.conf` 与 `tools/audio/sc8280xp.conf` 一致；`nix build .` 现在产出
   firmware 而非内核；`firmware-precedence` 用 `mkAfter` 负向测试确认会失败。
+- P3 分析（纯求值，未构建）：基底 `defconfig = "defconfig"` + `enableCommonConfig` 的
+  configfile 可求出；与 `gaokun3_defconfig` 比对，504 个符号里 110 个与 nixpkgs 显式策略
+  重叠、其中仅 12 个值冲突，故增量只需 3 条。`nix flake check --no-build --all-systems`
+  在开启 `enableCommonConfig` 后仍通过。
 
 ### 11.4 待办（用户侧）
 
@@ -751,3 +765,7 @@ EL2 路径在 `CLAUDE.md` 里被定位为实验性，因此选项默认关闭。
    确认 `out` 与 `modules` 都命中。
 6. 裁定 tools 包的 `meta.license`：`chiyuki0325/EGoTouchRev-Linux` 未声明许可，需要
    维护者确认，或在包内注明来源与授权状态。
+7. **实机冷启动验证 P3。** CI 只会构建内核，`includeDefaultModules` 与 `tpm2` 两处删除的
+   真正检验在 `nixos-rebuild` 与冷启动（modules-closure 与 initrd）。失败就回滚到 P2：
+   `boot.loader.systemd-boot.configurationLimit = 5` 已留有旧 generation。验证通过后再考虑
+   把基底换成 `defconfig` 并删除 `defconfig/gaokun3_defconfig`。
