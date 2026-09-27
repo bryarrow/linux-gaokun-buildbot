@@ -47,6 +47,29 @@
     "snd-soc-sc8280xp"
   ];
 
+  # The EL2 boot chain, i.e. what the Fedora image puts on the ESP when it is
+  # built with BUILD_EL2=true (scripts/ci/lib/common_image.sh:
+  # install_el2_efi_payloads). systemd-boot loads the two drivers from
+  # EFI/systemd/drivers, tcblaunch.exe sits at the ESP root, and the hypervisor
+  # reads the three DSP images from firmware/ on the ESP. Those three come from
+  # the firmware package, which keeps them uncompressed: the firmware
+  # environment the kernel searches has them as .zst, which this boot chain
+  # cannot read.
+  #
+  # boot.loader.systemd-boot.extraFiles owns both directions: it copies these
+  # files in and drops a marker under nixos/.extra-files, which the next
+  # generation's install uses to delete whatever it no longer lists
+  # (systemd-boot-builder.py: remove_extra_files). Turning el2.enable back off
+  # therefore takes the payloads off the ESP again.
+  el2EspFiles = lib.mkIf cfg.el2.enable {
+    "EFI/systemd/drivers/slbounceaa64.efi" = ../../../tools/el2/slbounceaa64.efi;
+    "EFI/systemd/drivers/qebspilaa64.efi" = ../../../tools/el2/qebspilaa64.efi;
+    "tcblaunch.exe" = ../../../tools/el2/tcblaunch.exe;
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcadsp8280.mbn" = "${firmware}/lib/firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcadsp8280.mbn";
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qccdsp8280.mbn" = "${firmware}/lib/firmware/qcom/sc8280xp/HUAWEI/gaokun3/qccdsp8280.mbn";
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn" = "${firmware}/lib/firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn";
+  };
+
   # Kernel command line from 50_make_image_fedora.sh, minus root= and
   # rootflags= which NixOS derives from its own configuration. The plymouth
   # entry is redundant with plymouth disabled on NixOS but harmless and
@@ -127,6 +150,12 @@ in {
     boot.kernelPackages = cfg.kernelPackages;
 
     boot.kernelParams = kernelParams;
+
+    # The EL2 boot chain only exists while the option is on (see el2EspFiles).
+    boot.loader.systemd-boot.extraFiles = el2EspFiles;
+    warnings =
+      lib.optional (cfg.el2.enable && !config.boot.loader.systemd-boot.enable)
+      "hardware.gaokun3.el2.enable installs its boot chain through boot.loader.systemd-boot.extraFiles; with any other boot loader those files never reach the ESP and the kernel would be started without the hypervisor it was built for";
 
     hardware.deviceTree = {
       enable = true;

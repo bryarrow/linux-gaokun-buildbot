@@ -140,9 +140,13 @@ It switches `boot.kernelPackages` to `pkgs.linuxPackages_gaokun3-el2`, boots
 (`modprobe.blacklist=simpledrm`). This path is experimental and is not a
 supported configuration, which is why it is off by default.
 
-The EL2 EFI payloads under `tools/el2/` are still installed by the Fedora image
-only, so a device that needs them on its ESP has to be set up by hand; see the
-migration notes.
+The module also puts the EL2 boot chain on the ESP for you, through
+`boot.loader.systemd-boot.extraFiles`: the two drivers under
+`EFI/systemd/drivers/`, `tcblaunch.exe` at the ESP root, and the three DSP
+images the hypervisor reads from `firmware/`. Turning the option off takes them
+off the ESP again, so nothing has to be copied or cleaned up by hand. That is
+also why the option expects `boot.loader.systemd-boot`: it is the loader that
+reads those drivers, and the module warns when another one is configured.
 
 ### Binary cache
 

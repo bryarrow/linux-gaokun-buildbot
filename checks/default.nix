@@ -92,6 +92,20 @@ in {
   el2DeviceTree = el2Evaluated.config.hardware.deviceTree.name;
   simpledrmBlacklisted = params: lib.elem "modprobe.blacklist=simpledrm" params;
 
+  # The EL2 boot chain the module puts on the ESP, and the same list sorted (the
+  # option is an attrset, so order is not meaningful).
+  el2EspExpected = [
+    "EFI/systemd/drivers/qebspilaa64.efi"
+    "EFI/systemd/drivers/slbounceaa64.efi"
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcadsp8280.mbn"
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qccdsp8280.mbn"
+    "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn"
+    "tcblaunch.exe"
+  ];
+  el2EspFiles = builtins.attrNames el2Evaluated.config.boot.loader.systemd-boot.extraFiles;
+  el2EspMissing = lib.subtractLists el2EspFiles el2EspExpected;
+  el2EspUnexpected = lib.subtractLists el2EspExpected el2EspFiles;
+
   # `hardware.firmware` builds a buildEnv with ignoreCollisions, and the winner
   # of a name present in several packages is decided by priority first and by
   # input order only when the priorities are equal (builder.pl:159). The module
@@ -146,6 +160,9 @@ in {
     && simpledrmBlacklisted el2Evaluated.config.boot.kernelParams
     && !simpledrmBlacklisted evaluated.config.boot.kernelParams
     && lib.getName evaluated.config.boot.kernelPackages.kernel == "linux-gaokun3"
+    && el2EspMissing == []
+    && el2EspUnexpected == []
+    && builtins.attrNames evaluated.config.boot.loader.systemd-boot.extraFiles == []
     then pkgs.runCommand "gaokun3-el2-wiring" {} "touch $out"
     else throw ''
       hardware.gaokun3.el2.enable did not switch everything it owns:
@@ -153,6 +170,9 @@ in {
         device tree: ${el2DeviceTree} (want qcom/sc8280xp-huawei-gaokun3-el2.dtb)
         base kernel: ${lib.getName evaluated.config.boot.kernelPackages.kernel} (want linux-gaokun3)
         simpledrm blacklisted: el2=${lib.boolToString (simpledrmBlacklisted el2Evaluated.config.boot.kernelParams)}, base=${lib.boolToString (simpledrmBlacklisted evaluated.config.boot.kernelParams)} (want true/false)
+        ESP files missing: ${lib.concatStringsSep ", " el2EspMissing}
+        ESP files not expected: ${lib.concatStringsSep ", " el2EspUnexpected}
+        base ESP extra files: ${lib.concatStringsSep ", " (builtins.attrNames evaluated.config.boot.loader.systemd-boot.extraFiles)} (want none)
     '';
 
   # generate-config.pl already fails the kernel build when a required option does
