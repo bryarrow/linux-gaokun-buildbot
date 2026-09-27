@@ -84,12 +84,7 @@
     "fbcon=rotate:1"
     "usbhid.quirks=0x12d1:0x10b8:0x20000000"
     "plymouth.enable=0"
-  ]
-  # The Fedora image adds this to its EL2 entry and to nothing else
-  # (50_make_image_fedora.sh). What it fixes is not recorded anywhere in this
-  # tree, so it is reproduced as-is; NIXOS-MIGRATION.md 11.4 lists what a boot
-  # of the variant would have to show to settle it.
-  ++ lib.optional cfg.el2.enable "modprobe.blacklist=simpledrm";
+  ];
 in {
   options.hardware.gaokun3 = {
     enable = lib.mkEnableOption ''
@@ -98,24 +93,23 @@ in {
 
     el2.enable = lib.mkEnableOption ''
       the experimental EL2 variant, where Linux runs as a guest on the vendor
-      hypervisor instead of taking the machine over. It selects
-      pkgs.linuxPackages_gaokun3-el2, the matching device tree and that entry's
-      kernel command line; it is not a supported configuration, so it is off by
-      default
+      hypervisor instead of taking the machine over. It adds a second boot menu
+      entry, "NixOS (el2)", carrying pkgs.linuxPackages_gaokun3-el2, the matching
+      device tree and that entry's command line, and it installs the boot chain
+      the hypervisor needs onto the ESP. The normal entry keeps the stock kernel,
+      so this can stay enabled and EL1/EL2 are chosen at boot; it is not a
+      supported configuration
     '';
 
     kernelPackages = lib.mkOption {
       type = lib.types.unspecified;
-      default =
-        if cfg.el2.enable
-        then pkgs.linuxPackages_gaokun3-el2
-        else pkgs.linuxPackages_gaokun3;
-      defaultText = lib.literalExpression ''
-        if config.hardware.gaokun3.el2.enable
-        then pkgs.linuxPackages_gaokun3-el2
-        else pkgs.linuxPackages_gaokun3
+      default = pkgs.linuxPackages_gaokun3;
+      defaultText = lib.literalExpression "pkgs.linuxPackages_gaokun3";
+      description = ''
+        The gaokun3 kernel package set the normal boot entry uses. Set it to
+        pkgs.linuxPackages_gaokun3-el2 to make the whole system the EL2 variant
+        instead of using the el2 boot entry.
       '';
-      description = "The gaokun3 kernel package set to boot with.";
     };
 
     firmware = lib.mkOption {
@@ -163,9 +157,26 @@ in {
       enable = true;
       # The kernel builds <board>-el2.dtb by applying sc8280xp-el2.dtbo to the
       # board tree (arch/arm64/boot/dts/qcom/Makefile), so the variant needs no
-      # extra source here -- only this name, and it has to match the kernel
-      # package, which is why both follow el2.enable.
-      name = "qcom/sc8280xp-huawei-gaokun3" + lib.optionalString cfg.el2.enable "-el2" + ".dtb";
+      # extra source here -- only this name, and only for the el2 entry below.
+      name = "qcom/sc8280xp-huawei-gaokun3.dtb";
+    };
+
+    # EL2 is a boot menu alternative, not a different system: the configuration
+    # above keeps the stock kernel and device tree, and this entry carries the
+    # variant. slbounce's README describes exactly this shape -- "add two menu
+    # items in your bootloader, specifying 'normal' and 'EL2' devicetree in each"
+    # -- and it means going back to EL1 needs no configuration change, so the ESP
+    # payloads (which a Fedora install on the same ESP also uses) stay in place.
+    specialisation = lib.optionalAttrs cfg.el2.enable {
+      el2.configuration = {
+        boot.kernelPackages = lib.mkForce pkgs.linuxPackages_gaokun3-el2;
+        hardware.deviceTree.name = lib.mkForce "qcom/sc8280xp-huawei-gaokun3-el2.dtb";
+        # The Fedora image appends this to its EL2 entry and to nothing else
+        # (50_make_image_fedora.sh). What it fixes is not recorded anywhere in
+        # this tree, so it is reproduced as-is; NIXOS-MIGRATION.md 11.4 lists what
+        # a boot of the entry would have to show to settle it.
+        boot.kernelParams = ["modprobe.blacklist=simpledrm"];
+      };
     };
 
     # WCN6855, QCA Bluetooth and Adreno 660 firmware come from linux-firmware,

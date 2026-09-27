@@ -135,18 +135,20 @@ Fedora pipeline ships as `kernel-gaokun3-el2`:
 { hardware.gaokun3.el2.enable = true; }
 ```
 
-It switches `boot.kernelPackages` to `pkgs.linuxPackages_gaokun3-el2`, boots
-`sc8280xp-huawei-gaokun3-el2.dtb`, and adds that entry's kernel command line
-(`modprobe.blacklist=simpledrm`). This path is experimental and is not a
-supported configuration, which is why it is off by default.
+It adds a second boot entry, **NixOS (el2)**, which uses
+`pkgs.linuxPackages_gaokun3-el2`, boots `sc8280xp-huawei-gaokun3-el2.dtb` and
+adds that entry's kernel command line (`modprobe.blacklist=simpledrm`). The
+normal entry keeps the stock kernel and device tree, so EL1 and EL2 are chosen
+at boot and this can stay enabled; setting it to `false` again removes the entry.
+This path is experimental and is not a supported configuration.
 
 The module also puts the EL2 boot chain on the ESP for you, through
 `boot.loader.systemd-boot.extraFiles`: the two drivers under
 `EFI/systemd/drivers/`, `tcblaunch.exe` at the ESP root, and the three DSP
-images the hypervisor reads from `firmware/`. Turning the option off takes them
-off the ESP again, so nothing has to be copied or cleaned up by hand. That is
-also why the option expects `boot.loader.systemd-boot`: it is the loader that
-reads those drivers, and the module warns when another one is configured.
+images the hypervisor reads from `firmware/`. Nothing has to be copied or
+cleaned up by hand. That is also why the option expects
+`boot.loader.systemd-boot`: it is the loader that reads those drivers, and the
+module warns when another one is configured.
 
 Those paths live on the ESP, not inside one system, and the legacy Fedora EL2
 image writes exactly the same ones. On a machine that boots both, `sd-boot`

@@ -88,9 +88,27 @@ in {
     modules = baseModules ++ [{hardware.gaokun3.el2.enable = true;}];
   };
 
-  el2KernelName = lib.getName el2Evaluated.config.boot.kernelPackages.kernel;
-  el2DeviceTree = el2Evaluated.config.hardware.deviceTree.name;
   simpledrmBlacklisted = params: lib.elem "modprobe.blacklist=simpledrm" params;
+
+  # Enabling the variant must not move the normal entry: it adds a
+  # specialisation instead, so both entries exist side by side and EL1/EL2 is a
+  # boot menu choice (slbounce's README describes the same shape). The four
+  # values below are the whole contract.
+  baseKernelName = lib.getName el2Evaluated.config.boot.kernelPackages.kernel;
+  baseDeviceTree = el2Evaluated.config.hardware.deviceTree.name;
+  baseBlacklistsSimpledrm = simpledrmBlacklisted el2Evaluated.config.boot.kernelParams;
+  el2Specialisation =
+    el2Evaluated.config.specialisation.el2.configuration or null;
+  el2KernelName =
+    if el2Specialisation == null
+    then "none"
+    else lib.getName el2Specialisation.boot.kernelPackages.kernel;
+  el2DeviceTree =
+    if el2Specialisation == null
+    then "none"
+    else el2Specialisation.hardware.deviceTree.name;
+  el2BlacklistsSimpledrm =
+    el2Specialisation != null && simpledrmBlacklisted el2Specialisation.boot.kernelParams;
 
   # The EL2 boot chain the module puts on the ESP, and the same list sorted (the
   # option is an attrset, so order is not meaningful).
@@ -150,29 +168,34 @@ in {
       list: ${lib.concatStringsSep ", " firmwareNames}
     '';
 
-  # hardware.gaokun3.el2.enable has to move three things at once -- the kernel
-  # package, the device tree the boot entry passes, and that entry's command
-  # line -- and the base system has to keep all three. Comparing the two
-  # evaluations catches a switch that forgets one, without building a kernel.
+  # hardware.gaokun3.el2.enable adds a boot menu entry and the ESP boot chain;
+  # it must not move the normal entry, and with the option off neither may exist.
+  # Comparing the two evaluations catches a specialisation that forgets one of the
+  # three overrides, without building either kernel.
   el2-wiring =
     if el2KernelName == "linux-gaokun3-el2"
     && el2DeviceTree == "qcom/sc8280xp-huawei-gaokun3-el2.dtb"
-    && simpledrmBlacklisted el2Evaluated.config.boot.kernelParams
-    && !simpledrmBlacklisted evaluated.config.boot.kernelParams
-    && lib.getName evaluated.config.boot.kernelPackages.kernel == "linux-gaokun3"
+    && el2BlacklistsSimpledrm
+    && baseKernelName == "linux-gaokun3"
+    && baseDeviceTree == "qcom/sc8280xp-huawei-gaokun3.dtb"
+    && !baseBlacklistsSimpledrm
     && el2EspMissing == []
     && el2EspUnexpected == []
     && builtins.attrNames evaluated.config.boot.loader.systemd-boot.extraFiles == []
+    && !(evaluated.config.specialisation ? el2)
     then pkgs.runCommand "gaokun3-el2-wiring" {} "touch $out"
     else throw ''
-      hardware.gaokun3.el2.enable did not switch everything it owns:
-        kernel: ${el2KernelName} (want linux-gaokun3-el2)
-        device tree: ${el2DeviceTree} (want qcom/sc8280xp-huawei-gaokun3-el2.dtb)
-        base kernel: ${lib.getName evaluated.config.boot.kernelPackages.kernel} (want linux-gaokun3)
-        simpledrm blacklisted: el2=${lib.boolToString (simpledrmBlacklisted el2Evaluated.config.boot.kernelParams)}, base=${lib.boolToString (simpledrmBlacklisted evaluated.config.boot.kernelParams)} (want true/false)
+      hardware.gaokun3.el2.enable did not set up the entry it owns:
+        el2 entry kernel: ${el2KernelName} (want linux-gaokun3-el2)
+        el2 entry device tree: ${el2DeviceTree} (want qcom/sc8280xp-huawei-gaokun3-el2.dtb)
+        el2 entry simpledrm blacklisted: ${lib.boolToString el2BlacklistsSimpledrm} (want true)
+        base kernel: ${baseKernelName} (want linux-gaokun3)
+        base device tree: ${baseDeviceTree} (want qcom/sc8280xp-huawei-gaokun3.dtb)
+        base simpledrm blacklisted: ${lib.boolToString baseBlacklistsSimpledrm} (want false)
         ESP files missing: ${lib.concatStringsSep ", " el2EspMissing}
         ESP files not expected: ${lib.concatStringsSep ", " el2EspUnexpected}
         base ESP extra files: ${lib.concatStringsSep ", " (builtins.attrNames evaluated.config.boot.loader.systemd-boot.extraFiles)} (want none)
+        base has an el2 specialisation: ${lib.boolToString (evaluated.config.specialisation ? el2)} (want false)
     '';
 
   # generate-config.pl already fails the kernel build when a required option does
