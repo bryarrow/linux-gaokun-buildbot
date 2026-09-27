@@ -148,6 +148,14 @@ off the ESP again, so nothing has to be copied or cleaned up by hand. That is
 also why the option expects `boot.loader.systemd-boot`: it is the loader that
 reads those drivers, and the module warns when another one is configured.
 
+Those paths live on the ESP, not inside one system, and the legacy Fedora EL2
+image writes exactly the same ones. On a machine that boots both, `sd-boot`
+loads the drivers for every entry it starts, so the files are shared — and
+turning this option off removes them from the ESP, including the copy a Fedora
+installation may be relying on. What the drivers *do* is decided by the device
+tree they are given, so entries that are not EL2 are unaffected while the files
+are present; only their presence is shared.
+
 ### Binary cache
 
 The project publishes its kernel and firmware builds to a public Cachix cache,
