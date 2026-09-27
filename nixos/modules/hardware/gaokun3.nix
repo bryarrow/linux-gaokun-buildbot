@@ -155,7 +155,9 @@ in {
     boot.loader.systemd-boot.extraFiles = el2EspFiles;
     warnings =
       lib.optional (cfg.el2.enable && !config.boot.loader.systemd-boot.enable)
-      "hardware.gaokun3.el2.enable installs its boot chain through boot.loader.systemd-boot.extraFiles; with any other boot loader those files never reach the ESP and the kernel would be started without the hypervisor it was built for";
+      "hardware.gaokun3.el2.enable installs its boot chain through boot.loader.systemd-boot.extraFiles; with any other boot loader those files never reach the ESP and the kernel would be started without the hypervisor it was built for"
+      ++ lib.optional (cfg.el2.enable && config.boot.loader.systemd-boot.xbootldrMountPoint != null)
+      "hardware.gaokun3.el2.enable writes its boot chain to bootMountPoint, which boot.loader.systemd-boot.xbootldrMountPoint replaces with the XBOOTLDR partition -- but sd-boot loads drivers only from EFI/systemd/drivers on the ESP, so with an XBOOTLDR the payloads have to be copied to the ESP by hand";
 
     hardware.deviceTree = {
       enable = true;
