@@ -36,8 +36,18 @@ in
     # Patch the source copy rather than the installed file. The Fedora image
     # patches /lib/firmware in place; on NixOS firmware lives in the read-only
     # store, so the service points GAOKUN_NVM_DIR at a writable copy instead.
+    #
+    # The shebang has to become an absolute store path as well. wrapGAppsHook4
+    # replaces $out/bin/patch-nvm-bdaddr.py with a makeBinaryWrapper ELF stub
+    # and moves the script to .patch-nvm-bdaddr.py-wrapped, which the stub
+    # execs; NixOS has no /usr/bin/env, so `#!/usr/bin/env python3` failed with
+    # "env: 'python3': No such file or directory" (status 127) once the service
+    # got past its earlier failure. python3 is the bare interpreter: the patcher
+    # only needs the standard library. The tuner keeps ${python}, which carries
+    # pygobject3.
     postPatch = ''
       substituteInPlace bluetooth/patch-nvm-bdaddr.py \
+        --replace-fail '#!/usr/bin/env python3' '#!${python3}/bin/python3' \
         --replace-fail 'FIRMWARE_DIR = Path("/lib/firmware/qca")' \
           'FIRMWARE_DIR = Path(os.environ.get("GAOKUN_NVM_DIR", "/lib/firmware/qca"))'
     '';
