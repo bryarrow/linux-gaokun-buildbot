@@ -182,10 +182,22 @@ in {
       softdep ath11k_pci pre: qrtr
     '';
 
+    # The kernel's firmware search is the firmware_class.path parameter first
+    # and /lib/firmware after it (drivers/base/firmware_loader/main.c: fw_path[]).
+    # NixOS has no /lib/firmware -- it points the parameter at the whole
+    # firmware environment instead -- so overriding the parameter for the NVM
+    # below would hide every other firmware file. Restoring the fallback makes
+    # that override safe, and is what the parameter is meant to sit in front of.
+    systemd.tmpfiles.rules = [
+      "d /lib 0755 root root -"
+      "L+ /lib/firmware - - - - /run/current-system/firmware"
+    ];
+
     # The Fedora image's patch-nvm-bdaddr.service rewrites
     # /lib/firmware/qca/wcnhpnv21g.bin in place. NixOS firmware lives in the
-    # read-only store, so copy the NVM to a writable dir, patch there, and make
-    # the kernel look there first by prepending it to firmware_class.path.
+    # read-only store, so copy the NVM to a writable dir, patch there, and point
+    # firmware_class.path at that directory so the kernel prefers the patched
+    # copy.
     systemd.services.patch-nvm-bdaddr = {
       description = "Patch QCA Bluetooth NVM BDADDR";
       wantedBy = ["multi-user.target"];
@@ -226,7 +238,24 @@ in {
             exit 0
           fi
           GAOKUN_NVM_DIR="$dst" ${tools}/bin/patch-nvm-bdaddr.py
-          echo -n "/var/lib/gaokun3/firmware:/run/current-system/firmware" \
+          # firmware_class.path is one directory name, not a list: the kernel
+          # uses the parameter verbatim as fw_path[0] and only then falls back
+          # to /lib/firmware (drivers/base/firmware_loader/main.c). A
+          # colon-separated value therefore matches nothing at all, and because
+          # NixOS has no /lib/firmware it takes every firmware load with it --
+          # on 2026-09-27 that is exactly what happened: ath11k, the sound
+          # card's topology and a660_sqe.fw all failed with -ENOENT the moment
+          # this unit started succeeding, so wifi and audio died in that
+          # generation. Point the parameter at the override directory alone.
+          #
+          # That is only safe while /lib/firmware exists, which the tmpfiles
+          # rules above provide; without it nothing else would be found, so a
+          # missing fallback fails the unit instead of breaking the boot.
+          if [ ! -d /lib/firmware ]; then
+            echo "/lib/firmware is missing; leaving the firmware search path alone" >&2
+            exit 1
+          fi
+          echo -n /var/lib/gaokun3/firmware \
             > /sys/module/firmware_class/parameters/path
         '';
       };
