@@ -9,6 +9,9 @@
   pkgs,
   # The same predicate, for the NixOS evaluation below.
   allowUnfreePredicate,
+  # The evaluated installation medium, or null on anything but aarch64. The
+  # flake builds it; this file only asserts it is wired for the board.
+  installer,
 }: let
   series = import ../nix/lib/patch-series.nix {inherit lib;};
   pins = import ../nix/pins.nix;
@@ -153,6 +156,38 @@ in {
 
   kernel = self.packages.${system}.linux-gaokun3;
   el2Kernel = self.packages.${system}.linux-gaokun3-el2;
+
+  # The installation medium. The board only boots if the entry that names the
+  # kernel also names the device tree (`devicetree`, which systemd-boot passes
+  # to the kernel), so the assertions below cover both the evaluation facts and
+  # the entry as it is written into the ESP that nixos/installer.nix builds.
+  installerKernel = installer.config.boot.kernelPackages.kernel;
+  installerKernelName = lib.getName installerKernel;
+  installerKernelFile = installer.config.system.boot.loader.kernelFile;
+  installerInitrd = installer.config.system.build.initialRamdisk;
+  installerInitrdFile = installer.config.system.boot.loader.initrdFile;
+  installerDeviceTree = installer.config.hardware.deviceTree;
+  installerToplevel =
+    builtins.unsafeDiscardStringContext (toString installer.config.system.build.toplevel);
+  installerEsp = installer.config.system.build.gaokun3InstallerEsp;
+  installerMissingParams =
+    lib.filter (p: !(lib.elem p installer.config.boot.kernelParams))
+    [
+      "clk_ignore_unused"
+      "pd_ignore_unused"
+      "arm64.nopauth"
+      "efi=noruntime"
+      "fbcon=rotate:1"
+      "usbhid.quirks=0x12d1:0x10b8:0x20000000"
+    ];
+  installerProblems =
+    lib.optional (installerKernelName != "linux-gaokun3")
+      "installer kernel: ${installerKernelName} (want linux-gaokun3)"
+    ++ lib.optional (!installerDeviceTree.enable)
+      "installer does not enable hardware.deviceTree"
+    ++ lib.optional (installerDeviceTree.name != "qcom/sc8280xp-huawei-gaokun3.dtb")
+      "installer device tree: ${installerDeviceTree.name} (want qcom/sc8280xp-huawei-gaokun3.dtb)"
+    ++ map (p: "installer command line is missing ${p}") installerMissingParams;
 in {
   eval = pkgs.runCommand "gaokun3-eval" {} ''
     echo ${toplevel} > $out
@@ -196,6 +231,35 @@ in {
         ESP files not expected: ${lib.concatStringsSep ", " el2EspUnexpected}
         base ESP extra files: ${lib.concatStringsSep ", " (builtins.attrNames evaluated.config.boot.loader.systemd-boot.extraFiles)} (want none)
         base has an el2 specialisation: ${lib.boolToString (evaluated.config.specialisation ? el2)} (want false)
+    '';
+
+  # The installer has to start the same kernel and device tree the installed
+  # system does, with the command line the hardware needs, and systemd-boot has
+  # to hand the kernel that device tree. The evaluation facts are checked above;
+  # this reads the boot entry back out of the ESP nixos/installer.nix builds,
+  # which is the only place the wiring becomes real. Building the ESP pulls the
+  # kernel, initrd and systemd-boot, all of which the cache already has; it does
+  # not pull the live system, whose path the entry merely names.
+  installer-wiring =
+    if installerProblems == []
+    then
+      pkgs.runCommand "gaokun3-installer-wiring" {nativeBuildInputs = [pkgs.mtools];} ''
+        mcopy -i ${installerEsp} ::/loader/entries/nixos.conf nixos.conf
+
+        # The device tree line next to the kernel line is the whole point: the
+        # firmware has no usable one to pass.
+        grep -qF -- 'linux /EFI/nixos/${baseNameOf (toString installerKernel)}/${installerKernelFile}' nixos.conf
+        grep -qF -- 'initrd /EFI/nixos/${baseNameOf (toString installerInitrd)}/${installerInitrdFile}' nixos.conf
+        grep -qF -- 'devicetree /EFI/nixos/${baseNameOf (toString installerDeviceTree.package)}/${installerDeviceTree.name}' nixos.conf
+
+        # The squashfs store is what provides this init; without it the kernel
+        # would start and find no init.
+        grep -qF -- 'init=${installerToplevel}/init' nixos.conf
+        touch $out
+      ''
+    else throw ''
+      the installation medium is not wired for this machine:
+        ${lib.concatStringsSep "\n  " installerProblems}
     '';
 
   # generate-config.pl already fails the kernel build when a required option does
@@ -274,9 +338,14 @@ in {
   # it out of the cache. A push to main builds this and cachix-action's daemon
   # pushes the store paths; pull requests only evaluate, which is why the
   # expensive part lives here rather than in evaluation. The cross-compiled
-  # x86_64 packages are deliberately not part of it.
+  # x86_64 packages are deliberately not part of it, and so is installer-iso:
+  # it is a release artifact, not something a device substitutes, and a ~2 GB
+  # image plus its squashfs would evict kernels from a 5 GB cache by design
+  # (README's quota section). checks.installer-wiring still builds the ESP and
+  # reads the entry back, which is what can actually be wrong in the installer.
   packages = pkgs.linkFarm "gaokun3-packages" (
-    lib.mapAttrsToList (name: path: {inherit name path;}) self.packages.${system}
+    lib.mapAttrsToList (name: path: {inherit name path;})
+    (lib.removeAttrs self.packages.${system} ["installer-iso"])
     ++ [
       {name = "linux-gaokun3-modules"; path = kernel.modules;}
       {name = "linux-gaokun3-el2-modules"; path = el2Kernel.modules;}
