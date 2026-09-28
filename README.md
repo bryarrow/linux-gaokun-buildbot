@@ -140,7 +140,12 @@ It adds a second boot entry, **NixOS (el2)**, which uses
 adds that entry's kernel command line (`modprobe.blacklist=simpledrm`). The
 normal entry keeps the stock kernel and device tree, so EL1 and EL2 are chosen
 at boot and this can stay enabled; setting it to `false` again removes the entry.
-This path is experimental and is not a supported configuration.
+This path is experimental and is not a supported configuration. In EL2 the
+video codec does not come up — `qcom-venus` finds its firmware but fails to
+initialise it (`-EINVAL`) — while everything else checked on the device (wifi,
+audio, display, Bluetooth, and KVM itself) works. Secure Boot has to be off, and
+`tcblaunch.exe` has to be an old enough build for slbounce, so do not replace the
+copy this repository ships with the one from a Windows install.
 
 The module also puts the EL2 boot chain on the ESP for you, through
 `boot.loader.systemd-boot.extraFiles`: the two drivers under
