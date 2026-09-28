@@ -33,6 +33,13 @@ configure_git_identity() {
   git -C "$repo_dir" config user.email "github-actions[bot]@users.noreply.github.com"
 }
 
+# Names in a series file, in file order, with blank lines and comments removed.
+# nix/lib/patch-series.nix drops the same two, so a series file one pipeline
+# accepts the other accepts too.
+series_names() {
+  sed -e 's/\r$//' -e '/^$/d' -e '/^#/d' "$1"
+}
+
 # Apply a patch directory in the order fixed by its series file. The series
 # file must list every .patch in the directory exactly once; a missing,
 # duplicate, or unlisted patch aborts the build before any compilation.
@@ -48,7 +55,7 @@ apply_series() {
     exit 1
   fi
 
-  series_sorted="$(sort "$series_file")"
+  series_sorted="$(series_names "$series_file" | sort)"
   actual_sorted="$(printf '%s\n' "$patch_dir"/*.patch | sed 's|.*/||' | sort)"
   if [[ "$series_sorted" != "$actual_sorted" ]]; then
     echo "error: series file out of sync with $patch_dir:" >&2
@@ -60,7 +67,7 @@ apply_series() {
   while read -r patch; do
     [[ -n "$patch" ]] || continue
     git -C "$kern_src" am "$patch_dir/$patch"
-  done < "$series_file"
+  done < <(series_names "$series_file")
 }
 
 build_variant() {
@@ -119,9 +126,10 @@ fi
 configure_git_identity "$KERN_SRC_EL2"
 rm -rf "$KERN_OUT_EL2"
 make -C "$KERN_SRC_EL2" O="$KERN_OUT_EL2" ARCH=arm64 CROSS_COMPILE="$CROSS_COMPILE" clean
-git -C "$KERN_SRC_EL2" apply "$GAOKUN_DIR"/patches/el2/*.patch
-git -C "$KERN_SRC_EL2" add -A
-git -C "$KERN_SRC_EL2" commit -m "Apply EL2 patches"
+# Same rule as the four base directories: patches/el2/series fixes the order
+# and has to list every .patch in the directory exactly once. `git am` commits
+# each patch, so the previous glob plus `git add`/`git commit` is gone.
+apply_series "$KERN_SRC_EL2" "$GAOKUN_DIR/patches/el2"
 
 ccache -z || true
 build_variant "$KERN_SRC_EL2" "$KERN_OUT_EL2" "-gaokun3-el2"

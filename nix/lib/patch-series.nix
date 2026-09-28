@@ -13,6 +13,8 @@ dir: let
   seriesFile = root + "/patches/${dir}/series";
 
   # Blank lines and comments are allowed; everything else names a patch.
+  # scripts/ci/20_build_kernel_variants.sh's series_names() drops the same two,
+  # so a series file one pipeline accepts the other accepts too.
   listed =
     lib.filter (line: line != "" && !(lib.hasPrefix "#" line))
     (lib.splitString "\n" (lib.replaceStrings ["\r"] [""] (builtins.readFile seriesFile)));
@@ -21,13 +23,18 @@ dir: let
     lib.filter (lib.hasSuffix ".patch")
     (builtins.attrNames (builtins.readDir (root + "/patches/${dir}")));
 
+  # lib.subtractLists x y is y without x, so these read "listed but absent" and
+  # "present but not listed".
   missing = lib.subtractLists present listed;
   unlisted = lib.subtractLists listed present;
+  # A set comparison cannot see a name listed twice, and duplicates would make
+  # stdenv apply the same patch a second time and fail the build much later.
+  duplicated = lib.unique (lib.filter (name: lib.count (other: other == name) listed > 1) listed);
 in
-  if missing != [] || unlisted != []
+  if missing != [] || unlisted != [] || duplicated != []
   then
     throw
-    "patches/${dir}/series is out of sync with the directory: missing=[${lib.concatStringsSep " " missing}] unlisted=[${lib.concatStringsSep " " unlisted}]"
+    "patches/${dir}/series is out of sync with the directory: missing=[${lib.concatStringsSep " " missing}] unlisted=[${lib.concatStringsSep " " unlisted}] duplicated=[${lib.concatStringsSep " " duplicated}]"
   else
     map (name: {
       name = "${dir}/${lib.removeSuffix ".patch" name}";
