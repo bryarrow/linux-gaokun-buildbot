@@ -102,8 +102,10 @@ audio UCM — behind one option:
 
 Use `boot.loader.systemd-boot.enable = true`, which is what the device tree
 support is tested with. The kernel targets aarch64; on an x86_64 builder the
-flake's packages are cross-compiled. This NixOS support replaces the Fedora
-image pipeline with a NixOS install; the two are independent.
+flake's packages are cross-compiled. This is the path that will replace the
+Fedora image pipeline, but there is no NixOS install medium yet: installing onto
+a blank disk still goes through the legacy Fedora rescue USB
+([Rescue USB guide](docs/rescue_usb_guide_en.md)).
 
 Do **not** add `inputs.gaokun3.inputs.nixpkgs.follows = "nixpkgs"`. The kernel,
 firmware and tools are built from this repository's own pinned nixpkgs, which is

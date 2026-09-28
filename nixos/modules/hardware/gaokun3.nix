@@ -54,7 +54,8 @@
   # reads the three DSP images from firmware/ on the ESP. Those three come from
   # the firmware package, which keeps them uncompressed: the firmware
   # environment the kernel searches has them as .zst, which this boot chain
-  # cannot read.
+  # cannot read. They come from pkgs.linux-firmware-gaokun3 and not from
+  # hardware.gaokun3.firmware, because only that package carries them.
   #
   # boot.loader.systemd-boot.extraFiles owns both directions: it copies these
   # files in and drops a marker under nixos/.extra-files, which the next
