@@ -24,8 +24,7 @@
 in {
   # The kernel's arm64 defconfig carries no LOCALVERSION, and the module
   # directory is 7.2.0-gaokun3, so this is what modDirVersion is checked
-  # against. The Fedora pipeline gets the same value from
-  # defconfig/gaokun3_defconfig instead.
+  # against. The EL2 variant restates it as -gaokun3-el2.
   LOCALVERSION = {freeform = "-gaokun3";};
 
   # The kernel's arm64 defconfig leaves Bluetooth LE off. The device pairs BLE
@@ -38,7 +37,7 @@ in {
   # usable TPM under Linux -- it boots from the device tree, so ACPI stays
   # disabled at runtime and there is no microsoft,ftpm node -- so IMA would only
   # ever run in TPM-bypass, and the builtin TPM core costs 90 s of every boot
-  # (see TCG_TPM below). Keep the pair off, as the pre-P3 defconfig did.
+  # (see TCG_TPM below). Keep the pair off.
   INTEGRITY = {tristate = "n";};
 
   # common config asks for IMA, but IMA only exists when INTEGRITY is on, so with
@@ -57,9 +56,8 @@ in {
   # systemd's tpm2 generator then hooks tpm2.target -- whose unit says
   # Wants=dev-tpm0.device -- into sysinit.target, and the device never appears,
   # so the boot spends the full 90 s device timeout waiting. As a module the
-  # class directory does not exist when the generator runs, which is how the
-  # kernel behaved before P3. The override only sticks because INTEGRITY above
-  # stops IMA from selecting it back to "y".
+  # class directory does not exist when the generator runs. The override only
+  # sticks because INTEGRITY above stops IMA from selecting it back to "y".
   TCG_TPM = hardwareOverride {tristate = "m";};
 
   # nixpkgs' 32 MiB is not enough for the panel and the camera pipeline.

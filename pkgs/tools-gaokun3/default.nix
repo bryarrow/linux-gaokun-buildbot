@@ -33,9 +33,9 @@ in
       dconf
     ];
 
-    # Patch the source copy rather than the installed file. The Fedora image
-    # patches /lib/firmware in place; on NixOS firmware lives in the read-only
-    # store, so the service points GAOKUN_NVM_DIR at a writable copy instead.
+    # Patch the source copy rather than the installed file. On NixOS firmware
+    # lives in the read-only store, so the service points GAOKUN_NVM_DIR at a
+    # writable copy instead.
     #
     # The shebang has to become an absolute store path as well. wrapGAppsHook4
     # replaces $out/bin/patch-nvm-bdaddr.py with a makeBinaryWrapper ELF stub

@@ -1,8 +1,7 @@
 # The EL2 variant: Linux as a guest on the vendor hypervisor instead of taking
 # the machine over. The same source, patches and kernel config as linux-gaokun3
-# with patches/el2 appended and the module directory renamed, which is what the
-# Fedora pipeline ships as kernel-gaokun3-el2. CLAUDE.md calls this path
-# experimental, so hardware.gaokun3.el2.enable defaults to false.
+# with patches/el2 appended and the module directory renamed. CLAUDE.md calls
+# this path experimental, so hardware.gaokun3.el2.enable defaults to false.
 #
 # The wrapper goes through pkgs.callPackage rather than re-listing the base's
 # arguments, so the two packages cannot drift apart: adding a dependency to

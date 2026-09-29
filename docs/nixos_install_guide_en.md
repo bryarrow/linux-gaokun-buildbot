@@ -5,11 +5,7 @@ English | [中文](nixos_install_guide_zh.md)
 This installs NixOS on the internal disk from this repository's installer image.
 The image is the stock NixOS minimal installer with the gaokun3 kernel, device
 tree and kernel command line already in place, so it boots this machine directly
-and needs no Fedora step.
-
-If you already run NixOS and only want a recovery environment, the older
-[rescue USB guide](rescue_usb_guide_en.md) still works; this guide is what
-replaces it.
+and needs no separate distribution image.
 
 NixOS has no graphical installer: you partition the disk, write a configuration
 and run `nixos-install` from a root shell. If you have installed NixOS before,
@@ -309,8 +305,8 @@ Two things to know before you do this:
   with its own systemd-boot. systemd-boot still reads the other systems'
   entries, but back the file up first if you care about the old one.
 - The EL2 payloads live on the ESP and are shared: turning
-  `hardware.gaokun3.el2.enable` off deletes them, including a copy a Fedora
-  install may rely on. See the [dual-boot guide](dual_boot_guide_en.md) and the
+  `hardware.gaokun3.el2.enable` off deletes them, including a copy another
+  installation may rely on. See the
   [README](../README.md#el2-variant-experimental).
 
 ## Troubleshooting
@@ -327,7 +323,5 @@ Two things to know before you do this:
 - **The screen is sideways.** It should not be: `fbcon=rotate:1` is part of the
   module's command line, and the live system uses it too. A sideways console
   means the entry in use is not this repository's.
-- **`nixos-install` cannot fetch the flake.** The live system has NetworkManager,
-  not the Fedora tools: use `nmtui` or `nmcli`.
-- **You want the Fedora rescue environment instead.** It is still documented in
-  [rescue_usb_guide_en.md](rescue_usb_guide_en.md) and still built by CI.
+- **`nixos-install` cannot fetch the flake.** The live system uses NetworkManager:
+  use `nmtui` or `nmcli`.

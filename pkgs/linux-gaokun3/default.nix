@@ -5,8 +5,7 @@
   applyPatches,
   # The experimental variant where Linux runs as a guest on the vendor
   # hypervisor. It is the same tree with patches/el2 on top and its own
-  # LOCALVERSION, which is what the Fedora pipeline builds as
-  # kernel-gaokun3-el2; pkgs/linux-gaokun3-el2 wraps this file with it set.
+  # LOCALVERSION; pkgs/linux-gaokun3-el2 wraps this file with it set.
   el2 ? false,
   # NixOS's boot.kernelPackages apply function overrides the kernel with these
   # (randstruct seed, boot.kernelPatches, feature set). They must not be named
@@ -25,8 +24,8 @@
   # Order comes from each directory's series file and nowhere else. The base
   # series is prepended to whatever the caller passes through
   # boot.kernelPatches, so appending a patch cannot displace ours. patches/el2
-  # goes last of ours, because on the Fedora side it is applied to the tree the
-  # other four directories produced.
+  # goes last, so it applies on top of the tree the other four directories
+  # produced.
   basePatches =
     series "upstream"
     ++ series "others"
@@ -34,18 +33,16 @@
     ++ series "media"
     ++ lib.optionals el2 (series "el2");
 
-  # dts/ and defconfig/ are owned outright by this repository (not diffs
-  # against mainline), so they are copied into the tree instead of carried as
-  # patches — see scripts/lib/import_local_sources.sh.
+  # dts/ is owned outright by this repository (not a diff against mainline), so
+  # it is copied into the tree instead of carried as a patch.
   #
   # The copy has to happen on `src`, not on a postPatch handed to buildLinux:
   # generic.nix builds its configfile derivation with
   # `postPatch = kernel.postPatch + …`, where kernel.postPatch is build.nix's
   # own string. A postPatch passed to buildLinux is neither a parameter nor
-  # forwarded, so it would be silently dropped and gaokun3_defconfig would not
-  # exist when the config is generated. applyPatches runs its postPatch before
-  # both derivations inherit this src, which is what makes the defconfig
-  # visible at configuration time.
+  # forwarded, so it would be silently dropped and the board device tree would
+  # not exist when the source is configured. applyPatches runs its postPatch
+  # before both derivations inherit this src.
   src = applyPatches {
     name = "linux-${pins.kernelVersion}-gaokun3-source";
 
@@ -56,7 +53,6 @@
 
     postPatch = ''
       cp ${../../dts}/*.dts ${../../dts}/*.dtsi arch/arm64/boot/dts/qcom/
-      cp ${../../defconfig}/gaokun3_defconfig arch/arm64/configs/
     '';
   };
 in
@@ -71,15 +67,12 @@ in
       kernelPatches = basePatches ++ (args.kernelPatches or []);
 
       # kernel.release is "7.2.0" + CONFIG_LOCALVERSION, which the extra config
-      # below sets now that the base is the kernel's own defconfig rather than a
-      # Gaokun fragment.
+      # below sets; the module directory has to match it.
       modDirVersion = "${pins.kernelVersion}${localVersion}";
 
       # The kernel's own arm64 defconfig plus nixpkgs' common config is the
       # distribution policy; nix/config/gaokun3-extra.nix is the reviewed
-      # Gaokun deviation. defconfig/gaokun3_defconfig is still copied into the
-      # tree (see postPatch) and still drives the Fedora pipeline, but the Nix
-      # kernel no longer selects it.
+      # Gaokun deviation.
       defconfig = "defconfig";
       enableCommonConfig = true;
       # The variant is the same distribution policy, so the reviewed deviation is
@@ -93,8 +86,8 @@ in
       # does not land fails the build instead of vanishing into a log line.
       # nix/config/gaokun3-extra.nix declares the one unreachable symbol (IMA,
       # which INTEGRITY=n makes invisible) optional, which is what makes them
-      # pass; the pre-P3 base closed whole menus and needed linux-rpi.nix's
-      # ignoreConfigErrors to hide the resulting errors instead.
+      # pass. ignoreConfigErrors is deliberately not set: as a global switch it
+      # would hide real conflicts along with the unreachable ones.
       extraMeta = {
         description = "Huawei MateBook E Go 2023 (gaokun3 / SC8280XP) kernel, patched from v${pins.kernelVersion}"
           + lib.optionalString el2 " (EL2 guest variant)";

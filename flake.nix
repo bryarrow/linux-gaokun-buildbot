@@ -101,8 +101,8 @@
       // lib.optionalAttrs (system == "aarch64-linux") {
         # `nix build .#installer-iso`; dd the result to a USB stick and boot the
         # device from it. The live system is the stock minimal installer with
-        # this flake's kernel, device tree and command line, so it can install
-        # NixOS on the internal disk without any Fedora artifact.
+        # this flake's kernel, device tree and command line, so it installs
+        # NixOS on the internal disk on its own.
         installer-iso = installer.config.system.build.isoImage;
       });
 

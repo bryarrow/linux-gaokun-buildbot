@@ -13,8 +13,9 @@
   firmware = pkgs.linux-firmware-gaokun3;
   tools = pkgs.gaokun3-tools;
 
-  # Mirrors the Fedora image's dracut add_drivers, minus btrfs (NixOS stages
-  # the root-filesystem driver itself) and the firmware_class path.
+  # The initrd module set for this board. NixOS stages the root filesystem's own
+  # driver, and the firmware_class path is not an initrd concern, so neither is
+  # listed here.
   initrdModules = [
     "nvme"
     "phy-qcom-qmp-pcie"
@@ -33,7 +34,8 @@
     "pinctrl_sc8280xp_lpass_lpi"
   ];
 
-  # tools/image-assets/etc/modules-load.d, the desktop profile.
+  # Modules loaded early rather than left to autoload from their DT/PCI/HID
+  # aliases. Each removal needs a cold-boot log, not reasoning.
   bootModules = [
     "panel-himax-hx83121a"
     "himax_hx83121a_spi"
@@ -47,9 +49,8 @@
     "snd-soc-sc8280xp"
   ];
 
-  # The EL2 boot chain, i.e. what the Fedora image puts on the ESP when it is
-  # built with BUILD_EL2=true (scripts/ci/lib/common_image.sh:
-  # install_el2_efi_payloads). systemd-boot loads the two drivers from
+  # The EL2 boot chain that has to sit on the ESP.
+  # systemd-boot loads the two drivers from
   # EFI/systemd/drivers, tcblaunch.exe sits at the ESP root, and the hypervisor
   # reads the three DSP images from firmware/ on the ESP. Those three come from
   # the firmware package, which keeps them uncompressed: the firmware
@@ -71,11 +72,11 @@
     "firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn" = "${firmware}/lib/firmware/qcom/sc8280xp/HUAWEI/gaokun3/qcslpi8280.mbn";
   };
 
-  # Kernel command line from 50_make_image_fedora.sh, minus root= and
-  # rootflags= which NixOS derives from its own configuration. The plymouth
-  # entry is redundant with plymouth disabled on NixOS but harmless and
-  # documents why the splash is off: plymouth draws through DRM and ignores
-  # fbcon=rotate:1, so it comes out sideways on this portrait panel.
+  # The kernel command line. root= and rootflags= are NixOS's own business, so
+  # they are not listed. The plymouth entry is redundant with plymouth disabled
+  # on NixOS but harmless and documents why the splash is off: plymouth draws
+  # through DRM and ignores fbcon=rotate:1, so it comes out sideways on this
+  # portrait panel.
   kernelParams = [
     "clk_ignore_unused"
     "pd_ignore_unused"
@@ -167,21 +168,20 @@ in {
     # variant. slbounce's README describes exactly this shape -- "add two menu
     # items in your bootloader, specifying 'normal' and 'EL2' devicetree in each"
     # -- and it means going back to EL1 needs no configuration change, so the ESP
-    # payloads (which a Fedora install on the same ESP also uses) stay in place.
+    # payloads (which another install sharing that ESP also uses) stay in place.
     specialisation = lib.optionalAttrs cfg.el2.enable {
       el2.configuration = {
         boot.kernelPackages = lib.mkForce pkgs.linuxPackages_gaokun3-el2;
         hardware.deviceTree.name = lib.mkForce "qcom/sc8280xp-huawei-gaokun3-el2.dtb";
-        # The Fedora image appends this to its EL2 entry and to nothing else
-        # (50_make_image_fedora.sh). What it fixes is not recorded anywhere in
-        # this tree, so it is reproduced as-is; NIXOS-MIGRATION.md 11.4 lists what
-        # a boot of the entry would have to show to settle it.
+        # This belongs to the EL2 entry and to nothing else. What it fixes is
+        # not recorded anywhere, so it is reproduced as-is; the open divergence
+        # list in CLAUDE.md says what a boot would have to show to settle it.
         boot.kernelParams = ["modprobe.blacklist=simpledrm"];
       };
     };
 
-    # WCN6855, QCA Bluetooth and Adreno 660 firmware come from linux-firmware,
-    # as on the Fedora image (atheros-firmware / qcom-firmware).
+    # WCN6855, QCA Bluetooth and Adreno 660 firmware come from the generic
+    # linux-firmware package; only the model-specific files are ours.
     hardware.enableRedistributableFirmware = lib.mkDefault true;
     # `hardware.firmware` resolves a name present in several packages to the
     # first one in its list, so our copy has to come before linux-firmware's.
@@ -199,21 +199,20 @@ in {
       extra-trusted-public-keys = ["gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAMJr7ibBxJtIsI="];
     };
 
-    # P3 turned on nixpkgs' common config, which provides the SATA, USB and HID
-    # modules NixOS' default initrd list asks for, so that list is no longer
-    # suppressed; USB_PCI is re-enabled in nix/config/gaokun3-extra.nix because
-    # ehci_pci/ohci_pci/xhci_pci only exist with it.
+    # nixpkgs' common config supplies the SATA, USB and HID modules NixOS'
+    # default initrd list asks for; USB_PCI is re-enabled in
+    # nix/config/gaokun3-extra.nix because ehci_pci/ohci_pci/xhci_pci only exist
+    # with it.
     boot.initrd.availableKernelModules = initrdModules;
     boot.kernelModules = bootModules;
     # The systemd initrd's TPM2 support adds tpm-tis and tpm-crb
     # (nixos/modules/system/boot/systemd/tpm2.nix). This machine has no usable
-    # TPM and the initrd needs none, so it stays off. That was also forced
-    # before the P3 base switch -- the Gaokun defconfig left CONFIG_ACPI off, so
-    # TCG_CRB was never built and the modules-closure failed on tpm-crb -- but
-    # the base is now the kernel's own defconfig, which sets ACPI and builds
-    # TCG_CRB. What keeps the 90 s tpm2 wait away (nix/config/gaokun3-extra.nix)
-    # is TCG_TPM=m, which leaves /sys/class/tpmrm absent while generators run;
-    # this line additionally keeps the initrd from carrying a TPM core at all.
+    # TPM and the initrd needs none, so it stays off. What keeps the 90 s tpm2
+    # wait away (nix/config/gaokun3-extra.nix) is TCG_TPM=m, which leaves
+    # /sys/class/tpmrm absent while generators run; this line additionally keeps
+    # the initrd from carrying a TPM core at all. Dropping it back to the
+    # nixpkgs default only needs a cold boot to confirm systemd-tpm2-generator
+    # stays out of sysinit.target.
     boot.initrd.systemd.tpm2.enable = false;
     # ath11k's probe synchronously request_module()s the QRTR family
     # (net-pf-42) from an async workqueue while qrtr.ko depends on ath11k and
@@ -236,9 +235,8 @@ in {
       "L+ /lib/firmware - - - - /run/current-system/firmware"
     ];
 
-    # The Fedora image's patch-nvm-bdaddr.service rewrites
-    # /lib/firmware/qca/wcnhpnv21g.bin in place. NixOS firmware lives in the
-    # read-only store, so copy the NVM to a writable dir, patch there, and point
+    # The NVM patcher rewrites qca/wcnhpnv21g.bin, which on NixOS lives in the
+    # read-only store. Copy it to a writable directory, patch there, and point
     # firmware_class.path at that directory so the kernel prefers the patched
     # copy.
     systemd.services.patch-nvm-bdaddr = {
@@ -317,7 +315,7 @@ in {
     # first-boot setup, the login screen and later accounts all come out
     # rotated. A user choosing rotation in Settings writes
     # ~/.config/monitors.xml, which takes precedence.
-    environment.etc."xdg/monitors.xml".source = ../../../tools/image-assets/etc/xdg/monitors.xml;
+    environment.etc."xdg/monitors.xml".source = ./gaokun3-monitors.xml;
 
     # The EC temp sensor and the per-core tsens zones are known to fail and the
     # machine has sudden power-off history. Log

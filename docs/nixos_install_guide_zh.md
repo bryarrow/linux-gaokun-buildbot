@@ -4,10 +4,7 @@
 
 本文用本仓库的安装镜像把 NixOS 装到内置硬盘。该镜像就是原版的 NixOS 最小安装器，
 只是内核、设备树和内核命令行已经换成这台机器需要的，因此它可以直接启动 MateBook E
-Go，全程不需要 Fedora。
-
-如果你已经装好 NixOS，只是想要一个救援环境，旧的
-[救援 U 盘指南](rescue_usb_guide_en.md)仍然可用；本文是它的替代品。
+Go，不需要另外发行版的镜像。
 
 NixOS 没有图形安装器：你需要自己分区、写配置，然后在 root shell 里跑
 `nixos-install`。装过 NixOS 的话，这就是[标准手动安装流程](https://nixos.org/manual/nixos/stable/#sec-installation-manual)，
@@ -279,7 +276,7 @@ Wi-Fi 和音频会立刻恢复，代价是蓝牙地址退回占位值。
   NixOS 会用它的 systemd-boot 覆写这个文件。systemd-boot 仍会读取其它系统的条目，
   但如果在意旧的那份，先备份。
 - EL2 载荷放在 ESP 上、是共享的：把 `hardware.gaokun3.el2.enable` 关掉会把它们删掉，
-  包括 Fedora 那份可能正在用的副本。详见[双系统指南](dual_boot_guide_en.md)与
+  包括别的安装可能正在用的副本。详见
   [README](../README.md#el2-variant-experimental)。
 
 ## 排错
@@ -292,7 +289,5 @@ Wi-Fi 和音频会立刻恢复，代价是蓝牙地址退回占位值。
   U 盘或写入有问题。
 - **屏幕是横的。** 不应该：`fbcon=rotate:1` 是模块命令行的一部分，live 系统也在用。
   控制台横着，说明启动用的不是本仓库的条目。
-- **`nixos-install` 拉不到 flake。** live 系统用的是 NetworkManager，不是 Fedora 那套
-  工具：用 `nmtui` 或 `nmcli`。
-- **你就是想要 Fedora 救援环境。** 见
-  [rescue_usb_guide_en.md](rescue_usb_guide_en.md)，它仍由 CI 构建。
+- **`nixos-install` 拉不到 flake。** live 系统用的是 NetworkManager：
+  用 `nmtui` 或 `nmcli`。

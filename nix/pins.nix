@@ -1,10 +1,6 @@
-# Single source of truth, on the Nix side, for what this flake builds against.
-#
-# build.env pins the same kernel tag and Fedora release for the legacy Fedora
-# pipeline. Nothing parses one from the other: the tarball hash has to be
-# written by hand either way, and a text parse would only save `kernelTag`
-# while adding a fragile coupling. `checks.pins-sync` asserts the two agree
-# instead, and disappears together with the Fedora pipeline.
+# The single source of truth for what this flake builds against. Bumping the
+# kernel is one edit here: the tag and version below, the tarball URL, and the
+# hash, in the same commit as the patch refresh that needs it.
 {
   # Tag and version are separate on purpose. The tag names the git ref the
   # release tarball was cut from; the version is what `make kernelrelease`
@@ -18,6 +14,4 @@
   # cdn.kernel.org's release tarball is the stable address.
   kernelTarballUrl = "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-7.2.tar.xz";
   kernelHash = "sha256-+f7z0UwN9TgZAm9L50RZg1wqCw3L9bW72eoZ8IKUArM=";
-
-  fedoraRelease = "44";
 }

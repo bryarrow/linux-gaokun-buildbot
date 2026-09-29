@@ -1,10 +1,9 @@
 # alsa-ucm-conf with this machine's Qualcomm/sc8280xp/sc8280xp.conf on top.
 #
 # NixOS finds UCM2 files at $ALSA_CONFIG_UCM2 (alsa-lib reads it), and the
-# module points that at this package. The stock tree already ships a
-# stock sc8280xp.conf, and the Fedora image resolves the conflict by
-# installing its file over the packaged one; here the merged tree is a package
-# of its own, so it can be cached and built once like any other.
+# module points that at this package. The stock tree already ships an
+# sc8280xp.conf that conflicts with this board's; here the merged tree is a
+# package of its own, so it can be cached and built once like any other.
 {
   lib,
   stdenvNoCC,

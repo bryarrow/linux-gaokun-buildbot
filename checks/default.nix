@@ -14,21 +14,10 @@
   installer,
 }: let
   series = import ../nix/lib/patch-series.nix {inherit lib;};
-  pins = import ../nix/pins.nix;
 
   # Evaluating this list makes nix/lib/patch-series.nix throw if any series
   # file has drifted from its directory.
   allSeries = lib.concatMap series ["upstream" "others" "himax" "media" "el2"];
-
-  # build.env still pins KERNEL_TAG/FEDORA_RELEASE for the Fedora pipeline.
-  # Nothing parses one file from the other; this asserts they agree, and goes
-  # away with build.env.
-  buildEnvLines = lib.splitString "\n" (builtins.replaceStrings ["\r"] [""] (builtins.readFile ../build.env));
-  pinsDrift =
-    lib.filter (line: !(lib.elem line buildEnvLines)) [
-      "KERNEL_TAG=${pins.kernelTag}"
-      "FEDORA_RELEASE=${pins.fedoraRelease}"
-    ];
 in {
   # The throw in nix/lib/patch-series.nix already fails evaluation; this makes
   # it a named check as well.
@@ -37,13 +26,8 @@ in {
       echo ${lib.escapeShellArgs (map (p: p.name) allSeries)} > $out
     '';
 
-  pins-sync =
-    if pinsDrift != []
-    then throw "nix/pins.nix and build.env disagree; build.env has no line: ${lib.concatStringsSep ", " pinsDrift}"
-    else pkgs.runCommand "gaokun3-pins-sync" {} "touch $out";
-
-  # A dangling symlink under firmware/ also kills every Fedora job at
-  # hashFiles, before it starts. `find -xtype l` is the exact test, and it has
+  # A dangling symlink under firmware/ makes every consumer that hashes the
+  # tree fail before it starts. `find -xtype l` is the exact test, and it has
   # to run at build time: Nix exposes no way to read a link's target during
   # evaluation, and builtins.pathExists returns true for a broken link.
   # Interpolating the link on its own would be useless anyway, since its
@@ -299,12 +283,11 @@ in {
     # Identity: the module directory and CONFIG_LOCALVERSION must agree.
     grep -qx 'CONFIG_LOCALVERSION="-gaokun3"' "$cfg"
 
-    # TCG_CRB is built now, because the kernel's own arm64 defconfig sets ACPI
-    # and the Gaokun defconfig did not. It cannot bind on this machine: the
-    # bootloader passes a real device tree, so `dt_is_stub()` is false and
-    # arch/arm64/kernel/acpi.c leaves ACPI disabled. The load-bearing guard
-    # stays TCG_TPM=m above -- a builtin TPM core is what put
-    # /sys/class/tpmrm in place before systemd's tpm2 generator ran.
+    # TCG_CRB is built because the kernel's own arm64 defconfig sets ACPI. It
+    # cannot bind on this machine: the bootloader passes a real device tree, so
+    # `dt_is_stub()` is false and arch/arm64/kernel/acpi.c leaves ACPI disabled.
+    # The load-bearing guard stays TCG_TPM=m above -- a builtin TPM core is what
+    # put /sys/class/tpmrm in place before systemd's tpm2 generator ran.
 
     # CONFIG_LSM comes from the kernel default now; it must not name the
     # "integrity" LSM, which no longer exists in 7.2.
