@@ -239,6 +239,11 @@ in {
     # read-only store. Copy it to a writable directory, patch there, and point
     # firmware_class.path at that directory so the kernel prefers the patched
     # copy.
+    #
+    # Inactive between boots: it re-runs on a switch only because
+    # switch-to-configuration starts the currently active targets, which pulls
+    # this unit back in after the activation script rewrote firmware_class.path.
+    # See CLAUDE.md's module notes before changing this.
     systemd.services.patch-nvm-bdaddr = {
       description = "Patch QCA Bluetooth NVM BDADDR";
       wantedBy = ["multi-user.target"];
