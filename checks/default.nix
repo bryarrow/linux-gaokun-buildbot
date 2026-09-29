@@ -42,6 +42,26 @@ in {
       fi
       touch $out
     '';
+
+  # Crash logs cannot live in RAM on this board: the firmware reinitialises DRAM
+  # on every reset, so a reserved-memory ramoops region registers and then reads
+  # back empty after a reboot. The persistent backend is the EFI variable one
+  # instead -- patches/others/0008 fixes its late bind and config-symbols asserts
+  # it is built in -- and it advertises the dmesg record only. This fails if a
+  # ramoops region, or the console front-end that only a RAM backend would feed,
+  # comes back without the hardware evidence to support it.
+  pstore-wiring =
+    pkgs.runCommand "gaokun3-pstore-wiring" {} ''
+      if grep -q 'compatible = "ramoops"' ${../dts}/sc8280xp-huawei-gaokun3.dts; then
+        echo "dts/ reserves a ramoops region again; it does not survive this board's reset" >&2
+        exit 1
+      fi
+      if grep -q 'PSTORE_CONSOLE =' ${../nix/config/gaokun3-extra.nix}; then
+        echo "PSTORE_CONSOLE is back in the delta; no persistent backend here feeds it" >&2
+        exit 1
+      fi
+      touch $out
+    '';
 }
 // lib.optionalAttrs (system == "aarch64-linux") (let
   # The module is aarch64-only — it selects an aarch64 kernel and a device
@@ -262,8 +282,13 @@ in {
     grep -qx 'CONFIG_CMA_SIZE_MBYTES=128' "$cfg"
     grep -qx 'CONFIG_USB_PCI=y' "$cfg"
     grep -qx 'CONFIG_BT_LE=y' "$cfg"
-    grep -qx 'CONFIG_PSTORE_CONSOLE=y' "$cfg"
     grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
+
+    # The crash-log backend is inherited from nixpkgs' common config rather than
+    # pinned in the delta, but it is the only persistent one on this machine
+    # (dts/ reserves no ramoops region, see checks.pstore-wiring). Asserting it
+    # here is what would catch a nixpkgs change that removes the backend.
+    grep -qx 'CONFIG_EFI_VARS_PSTORE=y' "$cfg"
 
     # TCG_TPM is pinned to a module and INTEGRITY stays off. A builtin TPM core
     # makes /sys/class/tpmrm exist from boot, and systemd's tpm2 generator then

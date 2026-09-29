@@ -5,3 +5,4 @@
 0005-platform-arm64-huawei-gaokun-ec-set-wakeup-source-property.patch
 0006-arm64-dts-qcom-sc8280xp-add-CPU-cooling-maps-at-75-C.patch
 0007-platform-arm64-huawei-gaokun-ec-register-hwmon-as-thermal-sensor.patch
+0008-efi-pstore-register-backend-when-efivars-ops-arrive-late.patch

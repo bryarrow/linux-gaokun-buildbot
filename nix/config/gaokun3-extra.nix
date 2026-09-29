@@ -78,11 +78,4 @@ in {
     tristate = "n";
     optional = true;
   };
-
-  # The kernel's arm64 defconfig leaves the pstore console backend off, where
-  # the previous gaokun3_defconfig base had it on. dts/ reserves the ramoops
-  # region with a console-size for it and the module mounts /sys/fs/pstore, so
-  # this is what keeps the console tail of an oops/panic -- not just the dmesg
-  # record -- available after a crash.
-  PSTORE_CONSOLE = {tristate = "y";};
 }

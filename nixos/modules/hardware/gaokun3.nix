@@ -307,10 +307,11 @@ in {
       };
     };
 
-    # pstore crash records live in the DT ramoops region (dts
-    # ramoops@d0000000) and appear as files once the pstore filesystem is
-    # mounted; systemd-pstore then dumps them to /var/lib/systemd/pstore on
-    # the boot after a crash.
+    # Crash records live in EFI variables (efi_pstore; patches/others/0008
+    # covers the late-efivars bind, and dts/ deliberately reserves no ramoops
+    # region because one cannot survive this board's reset) and appear as files
+    # once the pstore filesystem is mounted; systemd-pstore then dumps them to
+    # /var/lib/systemd/pstore on the boot after a crash.
     fileSystems."/sys/fs/pstore" = {
       device = "pstore";
       fsType = "pstore";

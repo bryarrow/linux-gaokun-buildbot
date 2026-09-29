@@ -219,18 +219,15 @@
 			linux,cma-default;
 		};
 
-		/* Crash dump region for pstore/ramoops. Above the simple-framebuffer
-		 * (0xc6200000 + 16 MiB) and all firmware reserved regions (max
-		 * 0xc50fffff), so it survives a warm reset and the kernel can
-		 * capture the tail of console output on oops/panic. */
-		ramoops@d0000000 {
-			compatible = "ramoops";
-			reg = <0x0 0xd0000000 0x0 0x100000>;
-			record-size = <0x20000>;
-			console-size = <0x40000>;
-			ftrace-size = <0x0>;
-			pmsg-size = <0x0>;
-		};
+		/*
+		 * No ramoops region on purpose. The firmware reinitialises DRAM
+		 * on every reset, and a reserved-memory node only tells Linux to
+		 * keep out -- UEFI never reads it -- so the region registers and
+		 * then reads back empty after a reboot. Crash logs persist in EFI
+		 * variables instead, through efi_pstore, which needs no region;
+		 * patches/others/0008 fixes its late-efivars bind. The module
+		 * mounts /sys/fs/pstore for it.
+		 */
 	};
 
 	thermal-zones {
