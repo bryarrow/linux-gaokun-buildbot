@@ -1,0 +1,35 @@
+Upstream: 86b23609d5e1 ("clk: qcom: gdsc: tear down genpds in unregister")
+Subject: clk: qcom: gdsc: tear down genpds in unregister
+
+gdsc_register() calls pm_genpd_init() for every GDSC, but gdsc_unregister()
+never removed them, so a driver unbind/rebind always collided with the name
+already in 'pm_genpd' ("debugfs: 'titan_top_gdsc' already exists"), after
+which camcc-sc8280xp failed to probe with -E22. On gaokun3 that left the
+camera subsystem unbound and unbindable until a reboot; the failure was
+captured in pstore. The upstream fix also swaps the order, removing the OF
+provider before tearing its subdomains down.
+
+Adapted from the gaokun-android port, where the pstore log was recorded.
+diff --git a/drivers/clk/qcom/gdsc.c b/drivers/clk/qcom/gdsc.c
+--- a/drivers/clk/qcom/gdsc.c
++++ b/drivers/clk/qcom/gdsc.c
+@@ -678,10 +678,18 @@ int gdsc_register(struct gdsc_desc *desc,
+ void gdsc_unregister(struct gdsc_desc *desc)
+ {
+ 	struct device *dev = desc->dev;
++	struct gdsc **scs = desc->scs;
+ 	size_t num = desc->num;
++	int i;
+ 
+-	gdsc_pm_subdomain_remove(desc, num);
+ 	of_genpd_del_provider(dev->of_node);
++	gdsc_pm_subdomain_remove(desc, num);
++
++	for (i = 0; i < num; i++) {
++		if (!scs[i])
++			continue;
++		pm_genpd_remove(&scs[i]->pd);
++	}
+ }
+ 
+ /*

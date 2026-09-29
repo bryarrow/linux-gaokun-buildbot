@@ -24,11 +24,12 @@
   # Order comes from each directory's series file and nowhere else. The base
   # series is prepended to whatever the caller passes through
   # boot.kernelPatches, so appending a patch cannot displace ours. patches/el2
-  # goes last, so it applies on top of the tree the other four directories
+  # goes last, so it applies on top of the tree the other five directories
   # produced.
   basePatches =
     series "upstream"
     ++ series "others"
+    ++ series "camera"
     ++ series "himax"
     ++ series "media"
     ++ lib.optionals el2 (series "el2");

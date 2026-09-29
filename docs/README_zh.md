@@ -150,6 +150,10 @@ extra-trusted-public-keys = gaokun3.cachix.org-1:ikL6EofK55QEwKucrUo44SPKewscvAM
 此外，本仓库通过 `media/` 补丁系列和 `CONFIG_VIDEO_QCOM_VENUS=m` 模块启用了
 SC8280XP 的 Venus 硬件视频编解码（H.264/HEVC/VP9 的编码与解码）。
 
+前后两颗摄像头在内核侧都已启用：前摄 `hi846`，后摄是这块板子实际使用的 **OV13B10**
+（上游设备树此前一直当成三星 S5K3L6）。`patches/camera/` 补上了传感器的设备树匹配与上电
+序列、修好了相机电源域；闪光灯走 PMIC。仍需用户态的相机栈来真正取流。
+
 ## 仓库结构
 
 - `patches/`：内核补丁与设备支持改动
@@ -172,6 +176,7 @@ SC8280XP 的 Venus 硬件视频编解码（H.264/HEVC/VP9 的编码与解码）�
 - `others/0006`：来自 [gaokun-android](https://github.com/vahiru/gaokun-android) 移植——主线 `sc8280xp.dtsi` 没有 CPU cooling map（每个 zone 只有一个 110 °C 的 critical trip），于是 CPU 会一直满跑直到紧急关机；这个补丁给绑定到该 cluster cpufreq cooling device 的八个每核 zone 各加了一个 75 °C 的 passive trip。这个缺口不是本机特有的，所以补丁是按上游标准写的
 - `others/0008`：同样来自 [gaokun-android](https://github.com/vahiru/gaokun-android) 移植——本机固件每次复位都会重新初始化 DRAM，崩溃日志没法留在内存区里，所以这个补丁让 `efi_pstore` 在 QSEECOM 后端的 `efivars`（约 0.76 s）就绪时注册，而不是让内置 initcall 错过这个窗口后永远放弃。设备树因此不再预留 `ramoops` 区，持久的崩溃记录走 EFI 变量
 - `media/*`：来自 [gaokun-android-kernel](https://github.com/pgs666/gaokun-android-kernel) 对 right-0903/linux-gaokun Venus 系列的移植，用于启用 SC8280XP Venus 硬件视频编解码（驱动资源、dt-bindings、`videocc` 与 `video-codec` 设备树节点）。gaokun3 的板级启用——指向已打包的 `qcvss8280.mbn` 的 `firmware-name` 与 `status = "okay"`——放在 `dts/` 里而不是补丁里
+- `camera/*`：来自 [gaokun-android](https://github.com/vahiru/gaokun-android) 移植——后摄实际是 OmniVision OV13B10，而不是上游设备树一直假设的三星 S5K3L6，所以这个系列补上了传感器的 OF 匹配表与板级上电序列，把三个 camcc RCG 标成 shared（否则相机电源域会指着已经断电的 PLL，每第二次取流都失败），并让 camss 只带真正绑上的传感器完成注册，避免选错后摄模组时把前摄也一起拖没。闪光灯走 PMIC，用设备树里自己的节点
 - `dts/`：直接拷进内核树，而不是作为补丁携带，这样升级内核时不会冲突
 - **[可选]** `el2/*`：改编自 [TravMurav/linux](https://github.com/TravMurav/linux/tree/x13s-6.18-v1.1-cxsd)，用于 EL2 启动路径，包括 SMP2P 交接、remoteproc attach/restart 流程、SCM/SHM owner 处理，以及相关的 rpmsg/QRTR/pmic_glink 稳定性修复
 

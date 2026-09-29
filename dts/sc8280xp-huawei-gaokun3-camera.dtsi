@@ -22,7 +22,7 @@
 	leds {
 		compatible = "gpio-leds";
 
-		pinctrl-0 = <&cam_indicator_en>, <&camera_flash_en>;
+		pinctrl-0 = <&cam_indicator_en>;
 		pinctrl-names = "default";
 
 		privacy_led: privacy-led {
@@ -33,13 +33,11 @@
 			panic-indicator;
 		};
 
-		camera_flash: led {
-			function = LED_FUNCTION_FLASH;
-			color = <LED_COLOR_ID_WHITE>;
-			gpios = <&tlmm 93 GPIO_ACTIVE_HIGH>;
-			linux,default-trigger = "none";
-			default-state = "off";
-		};
+		/*
+		 * GPIO93 used to drive a "white:flash" gpio-led here. It does not
+		 * light (measured) and it shadows the name a userspace flash
+		 * control looks for; the real flash is the PMIC one below.
+		 */
 	};
 
 	vreg_camf_1p2: regulator-camf-1p2 {
@@ -60,6 +58,13 @@
 		compatible = "regulator-fixed";
 
 		regulator-name = "vreg_camr";
+		/*
+		 * Rear sensor digital core rail, gated by GPIO92 (Windows
+		 * CAMS_RES_QRD). The board LDO sets the real voltage; 1.2V is
+		 * the OV13B10 DVDD nominal.
+		 */
+		regulator-min-microvolt = <1200000>;
+		regulator-max-microvolt = <1200000>;
 
 		gpio = <&tlmm 92 GPIO_ACTIVE_HIGH>;
 		enable-active-high;
@@ -108,6 +113,31 @@
 	};
 };
 
+/*
+ * Flash. The Windows \_SB.FLSH device has no GPIO/I2C resources, so the torch
+ * runs through the PMIC flash module (pmc8280c is a PM8350C, driver
+ * leds-qcom-flash); driving GPIO93 directly does not light it. Measured by
+ * lighting each channel in turn: the white LED is on channels 1 and 4. The
+ * current limits are conservative assumptions, not module datasheet values.
+ * flash-leds is deliberately not set on the sensor node: it would make
+ * v4l2-async wait for another subdev.
+ */
+&pmc8280c {
+	pmc8280c_flash: led-controller@ee00 {
+		compatible = "qcom,pm8350c-flash-led", "qcom,spmi-flash-led";
+		reg = <0xee00>;
+
+		camera_flash_led: led-0 {
+			function = LED_FUNCTION_FLASH;
+			color = <LED_COLOR_ID_WHITE>;
+			led-sources = <1>, <4>;
+			led-max-microamp = <200000>;
+			flash-max-microamp = <600000>;
+			flash-max-timeout-us = <400000>;
+		};
+	};
+};
+
 &camss {
 	/*
 	 * CSIPHY0, CSIPHY1 1.2v = l4d, 0.88v = l6d
@@ -122,13 +152,20 @@
 	status = "okay";
 
 	ports {
+		/*
+		 * port@0: csiphy0 -> rear OV13B10, with the board's own power
+		 * sequence (Windows CAMS_RES_QRD.bin): LDO2_B 2.8V (avdd),
+		 * LDO2_C 1.8V (dovdd), GPIO92-gated core rail (dvdd), reset
+		 * GPIO7, MCLK4 19.2 MHz. LDO2_B is shared with the panel's vddi,
+		 * which votes 1.8V; the sensor driver raises it while powered.
+		 */
 		port@0 {
 			csiphy0_ep: endpoint@0 {
 				reg = <0>;
 
 				clock-lanes = <7>;
 				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&s5k3l6_ep>;
+				remote-endpoint = <&ov13b10_ep>;
 			};
 		};
 
@@ -156,42 +193,45 @@
 	};
 
 	/*
-	 * https://source.puri.sm/Librem5/linux/-/blob/pureos/latest/drivers/media/i2c/s5k3l6xx.c
-	 *
-	 * poor image quality, no plan to extract downstream registers
-	 * configuration for it. I think nobody uses camera without tuning
-	 * to take photos. Front camera with conference is enough.
-	 *
-	 * This sensor has never been detected on 2023 model
+	 * Rear camera. The Windows driver package ships two rear modules
+	 * (ofilm_ov13b10 and lijing_s5k3l6); a scan of the CCI bus with the
+	 * rails up answered at 0x36 (OV13B10) and 0x50 (module EEPROM) and
+	 * nothing at 0x10 (S5K3L6), so this board's rear is the OV13B10.
+	 * Rails from CAMS_RES_QRD.bin: LDO2_B 2.8V (avdd, shared with the
+	 * panel's 1.8V vddi - the driver raises it while powered), LDO2_C
+	 * 1.8V (dovdd), the GPIO92-gated core rail (dvdd), reset GPIO7,
+	 * MCLK4. The upstream ov13b10 register tables assume a 19.2 MHz MCLK.
 	 */
-	camera_rear: camera@10 {
-		compatible = "samsung,s5k3l6xx";
-		reg = <0x10>;
+	camera_rear: camera@36 {
+		compatible = "ovti,ov13b10";
+		reg = <0x36>;
 
 		pinctrl-0 = <&camr_rgb_default>;
 		pinctrl-names = "default";
 
 		clocks = <&camcc CAMCC_MCLK4_CLK>;
-		clock-names = "mclk";
-		clock-frequency = <24000000>;
+		assigned-clocks = <&camcc CAMCC_MCLK4_CLK>;
+		assigned-clock-rates = <19200000>;
 
-		rstn-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
 
-		vddio-supply = <&vreg_camr>;
-		vdda-supply = <&vreg_l2b>; // 2.8v
-		vddd-supply = <&vreg_l2c>; // 1.8v
-
-		leds = <&privacy_led>; // &camera_flash can't be enabled for now
-		led-names = "privacy";
+		avdd-supply = <&vreg_l2b>;
+		dovdd-supply = <&vreg_l2c>;
+		dvdd-supply = <&vreg_camr>;
 
 		lens-focus = <&voice_coil_motor>;
 
 		orientation = <1>;
-		rotation = <180>; /* FIXME */
+		/*
+		 * Counter-clockwise (video-interface-devices.yaml). Confirmed on
+		 * device: preview upright, SENSOR_ORIENTATION 180.
+		 */
+		rotation = <180>;
 
 		port {
-			s5k3l6_ep: endpoint {
+			ov13b10_ep: endpoint {
 				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <560000000>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};
@@ -247,13 +287,6 @@
 &tlmm {
 	cam_indicator_en: cam-indicator-en-state {
 		pins = "gpio34";
-		function = "gpio";
-		drive-strength = <2>;
-		bias-disable;
-	};
-
-	camera_flash_en: camera-flash-en-state {
-		pins = "gpio93";
 		function = "gpio";
 		drive-strength = <2>;
 		bias-disable;

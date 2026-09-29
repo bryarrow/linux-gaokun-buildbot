@@ -1,0 +1,94 @@
+Subject: clk: qcom: camcc-sc8280xp: give the eight GDSCs their reset wait values
+
+The sc8280xp camcc driver leaves en_rest_wait_val / en_few_wait_val /
+clk_dis_wait_val unset, so gdsc_init() overwrites the hardware reset values
+with gdsc.c's MSM8974-era defaults. Read back on this board: GDSCR =
+0x00282801, i.e. 2 / 8 / 2. Every same-generation camcc driver with the same
+register offsets (camcc-sm8150, camcc-sc8180x, and the sc7280, sm6350,
+sm8550, sm8650, sa8775p and x1e80100 ones) writes 2 / 2 / 0xf. This restores
+those values. It is part of the gaokun3 camera power-domain fix and is
+written for upstream alongside the RCG change in the next patch.
+diff --git a/drivers/clk/qcom/camcc-sc8280xp.c b/drivers/clk/qcom/camcc-sc8280xp.c
+index 660d865..e4ec7e3 100644
+--- a/drivers/clk/qcom/camcc-sc8280xp.c
++++ b/drivers/clk/qcom/camcc-sc8280xp.c
+@@ -2711,6 +2711,9 @@ static struct gdsc titan_top_gdsc;
+ 
+ static struct gdsc bps_gdsc = {
+ 	.gdscr = 0x7004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "bps_gdsc",
+ 	},
+@@ -2721,6 +2724,9 @@ static struct gdsc bps_gdsc = {
+ 
+ static struct gdsc ife_0_gdsc = {
+ 	.gdscr = 0xa004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ife_0_gdsc",
+ 	},
+@@ -2731,6 +2737,9 @@ static struct gdsc ife_0_gdsc = {
+ 
+ static struct gdsc ife_1_gdsc = {
+ 	.gdscr = 0xb004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ife_1_gdsc",
+ 	},
+@@ -2741,6 +2750,9 @@ static struct gdsc ife_1_gdsc = {
+ 
+ static struct gdsc ife_2_gdsc = {
+ 	.gdscr = 0xf004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ife_2_gdsc",
+ 	},
+@@ -2751,6 +2763,9 @@ static struct gdsc ife_2_gdsc = {
+ 
+ static struct gdsc ife_3_gdsc = {
+ 	.gdscr = 0xf070,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ife_3_gdsc",
+ 	},
+@@ -2761,6 +2776,9 @@ static struct gdsc ife_3_gdsc = {
+ 
+ static struct gdsc ipe_0_gdsc = {
+ 	.gdscr = 0x8004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ipe_0_gdsc",
+ 	},
+@@ -2771,6 +2789,9 @@ static struct gdsc ipe_0_gdsc = {
+ 
+ static struct gdsc ipe_1_gdsc = {
+ 	.gdscr = 0x9004,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "ipe_1_gdsc",
+ 	},
+@@ -2781,6 +2802,9 @@ static struct gdsc ipe_1_gdsc = {
+ 
+ static struct gdsc titan_top_gdsc = {
+ 	.gdscr = 0xc1bc,
++	.en_rest_wait_val = 0x2,
++	.en_few_wait_val = 0x2,
++	.clk_dis_wait_val = 0xf,
+ 	.pd = {
+ 		.name = "titan_top_gdsc",
+ 	},

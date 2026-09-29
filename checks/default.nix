@@ -17,7 +17,7 @@
 
   # Evaluating this list makes nix/lib/patch-series.nix throw if any series
   # file has drifted from its directory.
-  allSeries = lib.concatMap series ["upstream" "others" "himax" "media" "el2"];
+  allSeries = lib.concatMap series ["upstream" "others" "camera" "himax" "media" "el2"];
 in {
   # The throw in nix/lib/patch-series.nix already fails evaluation; this makes
   # it a named check as well.
@@ -60,6 +60,33 @@ in {
         echo "PSTORE_CONSOLE is back in the delta; no persistent backend here feeds it" >&2
         exit 1
       fi
+      touch $out
+    '';
+
+  # The camera nodes are a contract with patches/camera: this board's rear module
+  # is an OV13B10, not the S5K3L6 the device tree assumed for a year, and the
+  # flash is the PMIC's, not the GPIO93 LED that never lit. A wired-but-never-
+  # binding sensor also blocks the whole camss notifier, which is why the
+  # fallback patch exists and why naming the wrong sensor is not a small mistake.
+  camera-wiring =
+    pkgs.runCommand "gaokun3-camera-wiring" {} ''
+      dts=${../dts}/sc8280xp-huawei-gaokun3-camera.dtsi
+
+      grep -q 'compatible = "ovti,ov13b10"' "$dts"
+      grep -q 'compatible = "hynix,hi846"' "$dts"
+
+      if grep -q 'samsung,s5k3l6xx' "$dts"; then
+        echo "the rear s5k3l6 node is back; this board's rear is an OV13B10 and a never-binding sensor blocks camss" >&2
+        exit 1
+      fi
+
+      # Flash: PMIC channels 1 and 4, and no GPIO93 LED shadowing the name.
+      grep -q 'led-sources = <1>, <4>;' "$dts"
+      if grep -q 'gpios = <&tlmm 93' "$dts"; then
+        echo "the GPIO93 flash LED is back; it does not light and shadows the PMIC flash name" >&2
+        exit 1
+      fi
+
       touch $out
     '';
 }
@@ -289,6 +316,18 @@ in {
     # (dts/ reserves no ramoops region, see checks.pstore-wiring). Asserting it
     # here is what would catch a nixpkgs change that removes the backend.
     grep -qx 'CONFIG_EFI_VARS_PSTORE=y' "$cfg"
+
+    # The camera stack, likewise inherited rather than pinned in the delta. The
+    # device tree names these drivers, and patches/camera is what makes the
+    # sensors bind; if a symbol silently disappears the cameras go with it and
+    # nothing else here would notice.
+    for sym in VIDEO_QCOM_CAMSS VIDEO_OV13B10 VIDEO_HI846 I2C_QCOM_CCI \
+               SC_CAMCC_8280XP LEDS_QCOM_FLASH; do
+      grep -qE "^CONFIG_$sym=(y|m)$" "$cfg" || {
+        echo "camera symbol CONFIG_$sym is not enabled" >&2
+        exit 1
+      }
+    done
 
     # TCG_TPM is pinned to a module and INTEGRITY stays off. A builtin TPM core
     # makes /sys/class/tpmrm exist from boot, and systemd's tpm2 generator then

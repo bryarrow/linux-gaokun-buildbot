@@ -1,0 +1,5 @@
+0001-clk-qcom-gdsc-tear-down-genpds-in-unregister.patch
+0002-clk-qcom-camcc-sc8280xp-gdsc-wait-vals.patch
+0003-clk-qcom-camcc-sc8280xp-mark-camnoc-ahb-rcgs-shared.patch
+0004-media-i2c-ov13b10-of-match-and-gaokun3-power-sequence.patch
+0005-media-qcom-camss-continue-without-never-bound-sensors.patch
