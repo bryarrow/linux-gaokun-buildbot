@@ -63,25 +63,37 @@ in {
       touch $out
     '';
 
-  # The camera nodes are a contract with patches/camera: this board's rear module
-  # is a Samsung S5K3L6 at 0x10 (found by scanning the CCI bus while the rails
-  # and MCLK were up; the OV13B10 is the other module the board can ship), and
-  # the flash is the PMIC's, not the GPIO93 LED that never lit. A wired-but-
-  # never-binding sensor also blocks the whole camss notifier, which is why the
-  # fallback patch exists and why naming the wrong sensor is not a small mistake.
+  # The camera nodes are a contract with patches/camera: the board ships two
+  # interchangeable rear modules, an OV13B10 at 0x36 and an S5K3L6 at 0x10, so
+  # both are described, both stay disabled, and the selector registers whichever
+  # one answered (gaokun3-camera-select.c). Both candidates hang off csiphy0 --
+  # CAMSS takes the CSIPHY index from the endpoint's port -- so they are two
+  # endpoints on port@0. The flash is the PMIC's, not the GPIO93 LED that never
+  # lit. A wired-but-never-binding sensor blocks the whole camss notifier, which
+  # is why the fallback patch exists as well.
   camera-wiring =
     pkgs.runCommand "gaokun3-camera-wiring" {} ''
       dts=${../dts}/sc8280xp-huawei-gaokun3-camera.dtsi
 
+      # Both modules, both disabled, and the selector owning both.
       grep -q 'compatible = "samsung,s5k3l6xx"' "$dts"
+      grep -q 'compatible = "ovti,ov13b10"' "$dts"
       grep -q 'reg = <0x10>;' "$dts"
-      grep -q 'remote-endpoint = <&s5k3l6_ep>;' "$dts"
-      grep -q 'compatible = "hynix,hi846"' "$dts"
-
-      if grep -q 'compatible = "ovti,ov13b10"' "$dts"; then
-        echo "an ov13b10 node is back; this unit's rear module is the S5K3L6, and two rear sensors cannot share csiphy0" >&2
+      grep -q 'reg = <0x36>;' "$dts"
+      if [ "$(grep -c 'status = "disabled";' "$dts")" -ne 2 ]; then
+        echo "the two rear module nodes are not both disabled; an enabled one would claim the shared reset line and MCLK" >&2
         exit 1
       fi
+      grep -q 'compatible = "huawei,gaokun3-rear-camera-select";' "$dts"
+      grep -q 'sensors = <&camera_s5k3l6>, <&camera_ov13b10>;' "$dts"
+
+      # csiphy0, one endpoint per candidate.
+      grep -q 'csiphy0_ep: endpoint@0 {' "$dts"
+      grep -q 'csiphy0_alt_ep: endpoint@1 {' "$dts"
+      grep -q 'remote-endpoint = <&s5k3l6_ep>;' "$dts"
+      grep -q 'remote-endpoint = <&ov13b10_ep>;' "$dts"
+
+      grep -q 'compatible = "hynix,hi846"' "$dts"
 
       # Flash: PMIC channels 1 and 4, and no GPIO93 LED shadowing the name.
       grep -q 'led-sources = <1>, <4>;' "$dts"
@@ -320,12 +332,13 @@ in {
     # here is what would catch a nixpkgs change that removes the backend.
     grep -qx 'CONFIG_EFI_VARS_PSTORE=y' "$cfg"
 
-    # The camera stack, likewise inherited rather than pinned in the delta. The
-    # device tree names these drivers, and patches/camera is what makes the
-    # sensors bind; if a symbol silently disappears the cameras go with it and
-    # nothing else here would notice.
+    # The camera stack: mostly inherited rather than pinned in the delta, plus
+    # the two symbols that arrive with patches/camera (VIDEO_S5K3L6XX and the
+    # module selector). The device tree names these drivers and patches/camera is
+    # what makes the sensors bind; if a symbol silently disappears the cameras go
+    # with it and nothing else here would notice.
     for sym in VIDEO_QCOM_CAMSS VIDEO_OV13B10 VIDEO_S5K3L6XX VIDEO_HI846 I2C_QCOM_CCI \
-               SC_CAMCC_8280XP LEDS_QCOM_FLASH; do
+               SC_CAMCC_8280XP LEDS_QCOM_FLASH VIDEO_GAOKUN3_CAMERA_SELECT; do
       grep -qE "^CONFIG_$sym=(y|m)$" "$cfg" || {
         echo "camera symbol CONFIG_$sym is not enabled" >&2
         exit 1

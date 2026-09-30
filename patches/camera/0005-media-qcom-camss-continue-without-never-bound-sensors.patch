@@ -2,23 +2,32 @@ Subject: media: qcom: camss: complete the notifier with the sensors that bound
 
 v4l2-async only calls complete() when every async connection registered for
 the notifier has bound, and CAMSS registers one per device-tree endpoint
-without checking whether a sensor will ever bind. The same board ships more
-than one rear camera module, so the device tree can only name one of them; on
-a unit with the other module the unnamed sensor never binds and blocks
-complete() for the whole notifier, so the front camera gets no subdev nodes
-either.
+without checking whether a sensor will ever bind. One CSIPHY can carry
+interchangeable camera modules -- the gaokun3 rear camera is an OV13B10 or an
+S5K3L6, and the device tree describes both -- so on a unit with one of them
+the other never binds and blocks complete() for the whole notifier, and the
+cameras that did bind get no subdev nodes either.
 
 After sensor_wait_ms (module parameter, default 20000, 0 disables), if the
 notifier has still not completed, unregister and rebuild it with only the
-endpoints whose sensors actually bound, and report the ones that did not.
-With nothing bound, leave it alone. This is an RFC for upstream: the sensor
-choice may belong in v4l2-async or in the device tree instead, but this is
-what makes one device tree work on both module variants today.
+endpoints whose sensors actually bound, and report the ones that did not. With
+nothing bound, leave it alone.
 
-Adapted from the gaokun-android port, verified there with
-ov13b10.fail_probe=1 and with the real module absent.
+Waiting the full sensor_wait_ms on every boot would be needless when the
+modules are alternatives rather than a sensor that is missing, so also track
+which CSIPHY ports have endpoints and which of those have a bound sensor: as
+soon as every port with an endpoint has one, re-arm the work after the much
+shorter sensor_settle_ms (default 1000, 0 disables), which is what brings the
+cameras up promptly.
+
+This is an RFC for upstream: the sensor choice may belong in v4l2-async or in
+the device tree instead, but this is what makes one device tree work on both
+module variants today.
+
+Adapted from the gaokun-android port, verified there with ov13b10.fail_probe=1
+and with the real module absent.
 diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
-index 2123f63..747ceec 100644
+index 2123f63..e16b9e6 100644
 --- a/drivers/media/platform/qcom/camss/camss.c
 +++ b/drivers/media/platform/qcom/camss/camss.c
 @@ -19,6 +19,7 @@
@@ -29,25 +38,30 @@ index 2123f63..747ceec 100644
  #include <linux/videodev2.h>
  
  #include <media/media-device.h>
-@@ -29,6 +30,17 @@
+@@ -29,6 +30,22 @@
  
  #include "camss.h"
  
 +/*
-+ * gaokun3 patches/0035：v4l2-async 要求端点上【所有】传感器都绑上才会建 subdev 节点。
-+ * 同一款板子有不同的后摄模组（OV13B10 / S5K3L6），DT 只能写一种；写错的那台机器上
-+ * 那颗传感器永远绑不上，于是前摄也一起消失（docs/stage4-findings.md #81/#106）。
-+ * 这里在 probe 之后等 sensor_wait_ms，仍未完成就把 notifier 拆掉、只带已绑上的传感器重建。
-+ * 0 = 关闭这个回落。
++ * gaokun3 patches/0035：v4l2-async 要求注册进 notifier 的【所有】传感器都绑上才会建
++ * subdev 节点，而 CAMSS 是按 DT 端点注册的。同一个 CSIPHY 端口上可以挂互相替代的模组
++ * （gaokun3 的后摄就是 OV13B10 / S5K3L6 二选一），落选的那颗永远不会绑，于是连前摄也
++ * 一起消失（docs/stage4-findings.md #81/#106）。这里在 probe 之后等 sensor_wait_ms，
++ * 仍未完成就把 notifier 拆掉、只带已绑上的传感器重建；sensor_settle_ms 是"每个有端点
++ * 的端口都至少绑上一颗"之后的短稳定期，走到这条路就不必等满。0 = 关闭对应行为。
 + */
 +static unsigned int sensor_wait_ms = 20000;
 +module_param(sensor_wait_ms, uint, 0644);
 +MODULE_PARM_DESC(sensor_wait_ms, "ms to wait for all sensors before continuing with the bound ones (0=off)");
 +
++static unsigned int sensor_settle_ms = 1000;
++module_param(sensor_settle_ms, uint, 0644);
++MODULE_PARM_DESC(sensor_settle_ms, "ms to wait after every CSIPHY port has a bound sensor before continuing with them (0=off)");
++
  #define CAMSS_CLOCK_MARGIN_NUMERATOR 105
  #define CAMSS_CLOCK_MARGIN_DENOMINATOR 100
  
-@@ -4790,7 +4802,20 @@ static int camss_parse_endpoint_node(struct device *dev,
+@@ -4790,7 +4807,20 @@ static int camss_parse_endpoint_node(struct device *dev,
   *
   * Return 0 on success or a negative error code on failure
   */
@@ -69,7 +83,7 @@ index 2123f63..747ceec 100644
  {
  	struct device *dev = camss->dev;
  	struct fwnode_handle *fwnode = dev_fwnode(dev), *ep;
-@@ -4799,6 +4824,11 @@ static int camss_parse_ports(struct camss *camss)
+@@ -4799,6 +4829,11 @@ static int camss_parse_ports(struct camss *camss)
  	fwnode_graph_for_each_endpoint(fwnode, ep) {
  		struct camss_async_subdev *csd;
  
@@ -81,7 +95,22 @@ index 2123f63..747ceec 100644
  		csd = v4l2_async_nf_add_fwnode_remote(&camss->notifier, ep,
  						      typeof(*csd));
  		if (IS_ERR(csd)) {
-@@ -4819,6 +4849,11 @@ err_cleanup:
+@@ -4809,6 +4844,14 @@ static int camss_parse_ports(struct camss *camss)
+ 		ret = camss_parse_endpoint_node(dev, ep, csd);
+ 		if (ret < 0)
+ 			goto err_cleanup;
++
++		/*
++		 * 0035: 记下这个端口上有端点。一块 CSIPHY 上可以挂互相替代的
++		 * 模组（gaokun3 的后摄就是这样），这些端点属于同一个端口，
++		 * 只要端口上有一颗绑上，剩下的就永远不会绑。
++		 */
++		if (csd->interface.csiphy_id < 32)
++			camss->csiphy_ports_used |= BIT(csd->interface.csiphy_id);
+ 	}
+ 
+ 	return 0;
+@@ -4819,6 +4862,11 @@ err_cleanup:
  	return ret;
  }
  
@@ -93,7 +122,7 @@ index 2123f63..747ceec 100644
  /*
   * camss_init_subdevices - Initialize subdev structures and resources
   * @camss: CAMSS device
-@@ -5177,6 +5212,19 @@ static int camss_subdev_notifier_bound(struct v4l2_async_notifier *async,
+@@ -5177,6 +5225,35 @@ static int camss_subdev_notifier_bound(struct v4l2_async_notifier *async,
  	csiphy->cfg.csi2 = &csd->interface.csi2;
  	subdev->host_priv = csiphy;
  
@@ -110,10 +139,26 @@ index 2123f63..747ceec 100644
 +				fwnode_handle_get(asd->match.fwnode);
 +	}
 +
++	if (id < 32)
++		camss->csiphy_ports_bound |= BIT(id);
++
++	/*
++	 * 0035: 一个端口上挂互相替代的模组时，落选的那颗永远不会绑，等满
++	 * sensor_wait_ms 是白等。只要每个有端点的端口都至少绑上了一颗，短暂
++	 * 稳定之后就用已绑上的重建 notifier；有端口还空着就继续等，那说明那
++	 * 个端口上的传感器还没来。
++	 */
++	if (sensor_settle_ms && !camss->notifier_complete &&
++	    camss->csiphy_ports_used &&
++	    (camss->csiphy_ports_bound & camss->csiphy_ports_used) ==
++		    camss->csiphy_ports_used)
++		mod_delayed_work(system_wq, &camss->sensor_fallback_work,
++				 msecs_to_jiffies(sensor_settle_ms));
++
  	return 0;
  }
  
-@@ -5186,6 +5234,8 @@ static int camss_subdev_notifier_complete(struct v4l2_async_notifier *async)
+@@ -5186,6 +5263,8 @@ static int camss_subdev_notifier_complete(struct v4l2_async_notifier *async)
  	struct v4l2_device *v4l2_dev = &camss->v4l2_dev;
  	struct v4l2_subdev *sd;
  
@@ -122,7 +167,7 @@ index 2123f63..747ceec 100644
  	list_for_each_entry(sd, &v4l2_dev->subdevs, list) {
  		struct csiphy_device *csiphy = sd->host_priv;
  		struct media_entity *input, *sensor;
-@@ -5225,6 +5275,39 @@ static const struct v4l2_async_notifier_operations camss_subdev_notifier_ops = {
+@@ -5225,6 +5304,43 @@ static const struct v4l2_async_notifier_operations camss_subdev_notifier_ops = {
  	.complete = camss_subdev_notifier_complete,
  };
  
@@ -136,8 +181,8 @@ index 2123f63..747ceec 100644
 +	if (camss->notifier_complete)
 +		return;
 +
-+	dev_warn(camss->dev, "not all sensors bound after %u ms; continuing with %u bound sensor(s)\n",
-+		 sensor_wait_ms, camss->num_bound_sensors);
++	dev_warn(camss->dev, "not all sensors bound; continuing with %u bound sensor(s)\n",
++		 camss->num_bound_sensors);
 +	list_for_each_entry(asd, &camss->notifier.waiting_list, asc_entry)
 +		dev_warn(camss->dev, "  never bound: %pfw\n", asd->match.fwnode);
 +
@@ -148,6 +193,10 @@ index 2123f63..747ceec 100644
 +	v4l2_async_nf_cleanup(&camss->notifier);
 +	v4l2_async_nf_init(&camss->notifier, &camss->v4l2_dev);
 +	camss->notifier.ops = &camss_subdev_notifier_ops;
++
++	/* 重建只保留已绑上的端点，端口位图跟着重来 */
++	camss->csiphy_ports_used = 0;
++	camss->csiphy_ports_bound = 0;
 +
 +	ret = camss_parse_ports_filtered(camss, true);
 +	if (ret < 0) {
@@ -162,7 +211,7 @@ index 2123f63..747ceec 100644
  static const struct media_device_ops camss_media_ops = {
  	.link_notify = v4l2_pipeline_link_notify,
  };
-@@ -5431,6 +5514,7 @@ static int camss_probe(struct platform_device *pdev)
+@@ -5431,6 +5547,7 @@ static int camss_probe(struct platform_device *pdev)
  	}
  
  	v4l2_async_nf_init(&camss->notifier, &camss->v4l2_dev);
@@ -170,7 +219,7 @@ index 2123f63..747ceec 100644
  
  	pm_runtime_enable(dev);
  
-@@ -5460,6 +5544,10 @@ static int camss_probe(struct platform_device *pdev)
+@@ -5460,6 +5577,10 @@ static int camss_probe(struct platform_device *pdev)
  		goto err_media_device_unregister;
  	}
  
@@ -181,7 +230,7 @@ index 2123f63..747ceec 100644
  	return 0;
  
  err_media_device_unregister:
-@@ -5496,7 +5584,11 @@ void camss_delete(struct camss *camss)
+@@ -5496,7 +5617,11 @@ void camss_delete(struct camss *camss)
  static void camss_remove(struct platform_device *pdev)
  {
  	struct camss *camss = platform_get_drvdata(pdev);
@@ -194,10 +243,10 @@ index 2123f63..747ceec 100644
  	v4l2_async_nf_cleanup(&camss->notifier);
  	camss_unregister_entities(camss);
 diff --git a/drivers/media/platform/qcom/camss/camss.h b/drivers/media/platform/qcom/camss/camss.h
-index 93d691c..c3ec868 100644
+index 93d691c..1e8e2c9 100644
 --- a/drivers/media/platform/qcom/camss/camss.h
 +++ b/drivers/media/platform/qcom/camss/camss.h
-@@ -124,6 +124,11 @@ struct camss_resources {
+@@ -124,6 +124,13 @@ struct camss_resources {
  struct camss {
  	struct v4l2_device v4l2_dev;
  	struct v4l2_async_notifier notifier;
@@ -206,6 +255,8 @@ index 93d691c..c3ec868 100644
 +	bool notifier_complete;
 +	struct fwnode_handle *bound_sensors[8];
 +	unsigned int num_bound_sensors;
++	u32 csiphy_ports_used;
++	u32 csiphy_ports_bound;
  	struct media_device media_dev;
  	struct device *dev;
  	struct csiphy_device *csiphy;

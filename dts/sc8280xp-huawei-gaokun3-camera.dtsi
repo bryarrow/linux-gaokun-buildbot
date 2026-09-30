@@ -153,11 +153,19 @@
 
 	ports {
 		/*
-		 * port@0: csiphy0 -> rear S5K3L6, with the board's own power
-		 * sequence (Windows CAMS_RES_QRD.bin): LDO2_B 2.8V (vdda),
-		 * LDO2_C 1.8V (vddio), GPIO92-gated core rail (vddd), reset
-		 * GPIO7, MCLK4 24 MHz. LDO2_B is shared with the panel's vddi,
-		 * which votes 1.8V; the sensor driver raises it while powered.
+		 * port@0: csiphy0, the rear camera. The board is built with one
+		 * of two interchangeable modules, an ofilm OV13B10 or a lijing
+		 * S5K3L6, so both endpoints are described and CAMSS completes
+		 * with whichever one binds; rear_camera_select below decides
+		 * that by registering the matching sensor node only. CAMSS takes
+		 * the CSIPHY index from the port number (camss_parse_endpoint_node),
+		 * so both candidates land on csiphy0.
+		 *
+		 * Power, from the board's own table (Windows CAMS_RES_QRD.bin):
+		 * LDO2_B 2.8V (vdda), LDO2_C 1.8V (vddio), the GPIO92-gated
+		 * core rail (vddd), reset GPIO7, MCLK4. LDO2_B is shared with
+		 * the panel's vddi, which votes 1.8V; the drivers raise it while
+		 * the module is powered.
 		 */
 		port@0 {
 			csiphy0_ep: endpoint@0 {
@@ -166,6 +174,14 @@
 				clock-lanes = <7>;
 				data-lanes = <0 1 2 3>;
 				remote-endpoint = <&s5k3l6_ep>;
+			};
+
+			csiphy0_alt_ep: endpoint@1 {
+				reg = <1>;
+
+				clock-lanes = <7>;
+				data-lanes = <0 1 2 3>;
+				remote-endpoint = <&ov13b10_ep>;
 			};
 		};
 
@@ -193,20 +209,23 @@
 	};
 
 	/*
-	 * Rear camera: Samsung S5K3L6 at 0x10. The Windows driver package ships
-	 * two rear modules (ofilm_ov13b10 and lijing_s5k3l6); a scan of the
-	 * rear CCI bus, taken while ov13b10_probe() had the rails and MCLK up,
-	 * answered at 0x10 and not at 0x36, so this 2023 unit carries the
-	 * S5K3L6. Rails from CAMS_RES_QRD.bin: LDO2_B 2.8V (vdda, shared with
-	 * the panel's 1.8V vddi - the driver raises it while powered), LDO2_C
-	 * 1.8V (vddio), the GPIO92-gated core rail (vddd), reset GPIO7, MCLK4
-	 * at 24 MHz. A unit carrying the OV13B10 instead needs this node and
-	 * the csiphy0 endpoint swapped; patches/camera/0004 leaves that driver
-	 * able to bind to a device tree.
+	 * The two rear camera modules this board is built with, at the
+	 * addresses their drivers expect. Both stay disabled: enabled, they
+	 * would claim the same reset line -- gpiolib hands it to one consumer
+	 * only, so the driver that loses that race fails on -EBUSY rather than
+	 * on the hardware it does not have -- and set the rate of the one MCLK4
+	 * against each other. rear_camera_select below powers the module, reads
+	 * these two id registers and registers only the node that answered. The
+	 * Windows driver package names them ofilm_ov13b10 and lijing_s5k3l6.
+	 *
+	 * Rails from CAMS_RES_QRD.bin: LDO2_B 2.8V (vdda, shared with the
+	 * panel's 1.8V vddi - the drivers raise it while powered), LDO2_C 1.8V
+	 * (vddio), the GPIO92-gated core rail (vddd), reset GPIO7, MCLK4.
 	 */
-	camera_rear: camera@10 {
+	camera_s5k3l6: camera@10 {
 		compatible = "samsung,s5k3l6xx";
 		reg = <0x10>;
+		status = "disabled";
 
 		pinctrl-0 = <&camr_rgb_default>;
 		pinctrl-names = "default";
@@ -214,6 +233,9 @@
 		clocks = <&camcc CAMCC_MCLK4_CLK>;
 		clock-names = "mclk";
 		clock-frequency = <24000000>;
+
+		assigned-clocks = <&camcc CAMCC_MCLK4_CLK>;
+		assigned-clock-rates = <24000000>;
 
 		rstn-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
 
@@ -239,7 +261,70 @@
 		};
 	};
 
+	camera_ov13b10: camera@36 {
+		compatible = "ovti,ov13b10";
+		reg = <0x36>;
+		status = "disabled";
+
+		pinctrl-0 = <&camr_rgb_default>;
+		pinctrl-names = "default";
+
+		clocks = <&camcc CAMCC_MCLK4_CLK>;
+		assigned-clocks = <&camcc CAMCC_MCLK4_CLK>;
+		assigned-clock-rates = <19200000>;
+
+		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
+
+		avdd-supply = <&vreg_l2b>;
+		dovdd-supply = <&vreg_l2c>;
+		dvdd-supply = <&vreg_camr>;
+
+		lens-focus = <&voice_coil_motor>;
+
+		orientation = <1>;
+		/* Same module orientation as the S5K3L6; see the node above. */
+		rotation = <180>;
+
+		port {
+			ov13b10_ep: endpoint {
+				data-lanes = <1 2 3 4>;
+				link-frequencies = /bits/ 64 <560000000>;
+				remote-endpoint = <&csiphy0_alt_ep>;
+			};
+		};
+	};
+
 	// eeprom@50/51 <= l2c
+};
+
+/*
+ * Rear camera module selector, see gaokun3-camera-select.c: it runs the
+ * module's power sequence once, reads the id registers of the two candidates
+ * above and registers only the node whose module answered, so one device tree
+ * and one kernel serve both module variants. Its supplies, clock and reset are
+ * the same ones the sensor nodes carry, because the sequence has to run before
+ * either sensor driver can be bound.
+ */
+/ {
+	rear_camera_select: rear-camera-select {
+		compatible = "huawei,gaokun3-rear-camera-select";
+
+		i2c-parent = <&cci1_i2c0>;
+		sensors = <&camera_s5k3l6>, <&camera_ov13b10>;
+
+		pinctrl-0 = <&camr_rgb_default>;
+		pinctrl-names = "default";
+
+		clocks = <&camcc CAMCC_MCLK4_CLK>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
+
+		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
+
+		vdda-supply = <&vreg_l2b>;
+		vddio-supply = <&vreg_l2c>;
+		vddd-supply = <&vreg_camr>;
+	};
 };
 
 &cci2 {
