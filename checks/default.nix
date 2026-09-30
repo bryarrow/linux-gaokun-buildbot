@@ -64,19 +64,22 @@ in {
     '';
 
   # The camera nodes are a contract with patches/camera: this board's rear module
-  # is an OV13B10, not the S5K3L6 the device tree assumed for a year, and the
-  # flash is the PMIC's, not the GPIO93 LED that never lit. A wired-but-never-
-  # binding sensor also blocks the whole camss notifier, which is why the
+  # is a Samsung S5K3L6 at 0x10 (found by scanning the CCI bus while the rails
+  # and MCLK were up; the OV13B10 is the other module the board can ship), and
+  # the flash is the PMIC's, not the GPIO93 LED that never lit. A wired-but-
+  # never-binding sensor also blocks the whole camss notifier, which is why the
   # fallback patch exists and why naming the wrong sensor is not a small mistake.
   camera-wiring =
     pkgs.runCommand "gaokun3-camera-wiring" {} ''
       dts=${../dts}/sc8280xp-huawei-gaokun3-camera.dtsi
 
-      grep -q 'compatible = "ovti,ov13b10"' "$dts"
+      grep -q 'compatible = "samsung,s5k3l6xx"' "$dts"
+      grep -q 'reg = <0x10>;' "$dts"
+      grep -q 'remote-endpoint = <&s5k3l6_ep>;' "$dts"
       grep -q 'compatible = "hynix,hi846"' "$dts"
 
-      if grep -q 'samsung,s5k3l6xx' "$dts"; then
-        echo "the rear s5k3l6 node is back; this board's rear is an OV13B10 and a never-binding sensor blocks camss" >&2
+      if grep -q 'compatible = "ovti,ov13b10"' "$dts"; then
+        echo "an ov13b10 node is back; this unit's rear module is the S5K3L6, and two rear sensors cannot share csiphy0" >&2
         exit 1
       fi
 
@@ -321,7 +324,7 @@ in {
     # device tree names these drivers, and patches/camera is what makes the
     # sensors bind; if a symbol silently disappears the cameras go with it and
     # nothing else here would notice.
-    for sym in VIDEO_QCOM_CAMSS VIDEO_OV13B10 VIDEO_HI846 I2C_QCOM_CCI \
+    for sym in VIDEO_QCOM_CAMSS VIDEO_OV13B10 VIDEO_S5K3L6XX VIDEO_HI846 I2C_QCOM_CCI \
                SC_CAMCC_8280XP LEDS_QCOM_FLASH; do
       grep -qE "^CONFIG_$sym=(y|m)$" "$cfg" || {
         echo "camera symbol CONFIG_$sym is not enabled" >&2

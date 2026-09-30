@@ -153,10 +153,10 @@
 
 	ports {
 		/*
-		 * port@0: csiphy0 -> rear OV13B10, with the board's own power
-		 * sequence (Windows CAMS_RES_QRD.bin): LDO2_B 2.8V (avdd),
-		 * LDO2_C 1.8V (dovdd), GPIO92-gated core rail (dvdd), reset
-		 * GPIO7, MCLK4 19.2 MHz. LDO2_B is shared with the panel's vddi,
+		 * port@0: csiphy0 -> rear S5K3L6, with the board's own power
+		 * sequence (Windows CAMS_RES_QRD.bin): LDO2_B 2.8V (vdda),
+		 * LDO2_C 1.8V (vddio), GPIO92-gated core rail (vddd), reset
+		 * GPIO7, MCLK4 24 MHz. LDO2_B is shared with the panel's vddi,
 		 * which votes 1.8V; the sensor driver raises it while powered.
 		 */
 		port@0 {
@@ -165,7 +165,7 @@
 
 				clock-lanes = <7>;
 				data-lanes = <0 1 2 3>;
-				remote-endpoint = <&ov13b10_ep>;
+				remote-endpoint = <&s5k3l6_ep>;
 			};
 		};
 
@@ -193,33 +193,36 @@
 	};
 
 	/*
-	 * Rear camera. The Windows driver package ships two rear modules
-	 * (ofilm_ov13b10 and lijing_s5k3l6); a scan of the CCI bus with the
-	 * rails up answered at 0x36 (OV13B10) and 0x50 (module EEPROM) and
-	 * nothing at 0x10 (S5K3L6), so this board's rear is the OV13B10.
-	 * Rails from CAMS_RES_QRD.bin: LDO2_B 2.8V (avdd, shared with the
-	 * panel's 1.8V vddi - the driver raises it while powered), LDO2_C
-	 * 1.8V (dovdd), the GPIO92-gated core rail (dvdd), reset GPIO7,
-	 * MCLK4. The upstream ov13b10 register tables assume a 19.2 MHz MCLK.
+	 * Rear camera: Samsung S5K3L6 at 0x10. The Windows driver package ships
+	 * two rear modules (ofilm_ov13b10 and lijing_s5k3l6); a scan of the
+	 * rear CCI bus, taken while ov13b10_probe() had the rails and MCLK up,
+	 * answered at 0x10 and not at 0x36, so this 2023 unit carries the
+	 * S5K3L6. Rails from CAMS_RES_QRD.bin: LDO2_B 2.8V (vdda, shared with
+	 * the panel's 1.8V vddi - the driver raises it while powered), LDO2_C
+	 * 1.8V (vddio), the GPIO92-gated core rail (vddd), reset GPIO7, MCLK4
+	 * at 24 MHz. A unit carrying the OV13B10 instead needs this node and
+	 * the csiphy0 endpoint swapped; patches/camera/0004 leaves that driver
+	 * able to bind to a device tree.
 	 */
-	camera_rear: camera@36 {
-		compatible = "ovti,ov13b10";
-		reg = <0x36>;
+	camera_rear: camera@10 {
+		compatible = "samsung,s5k3l6xx";
+		reg = <0x10>;
 
 		pinctrl-0 = <&camr_rgb_default>;
 		pinctrl-names = "default";
 
 		clocks = <&camcc CAMCC_MCLK4_CLK>;
-		assigned-clocks = <&camcc CAMCC_MCLK4_CLK>;
-		assigned-clock-rates = <19200000>;
+		clock-names = "mclk";
+		clock-frequency = <24000000>;
 
-		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
+		rstn-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
 
-		avdd-supply = <&vreg_l2b>;
-		dovdd-supply = <&vreg_l2c>;
-		dvdd-supply = <&vreg_camr>;
+		vddio-supply = <&vreg_l2c>;
+		vdda-supply = <&vreg_l2b>;
+		vddd-supply = <&vreg_camr>;
 
-		lens-focus = <&voice_coil_motor>;
+		leds = <&privacy_led>;
+		led-names = "privacy";
 
 		orientation = <1>;
 		/*
@@ -229,9 +232,8 @@
 		rotation = <180>;
 
 		port {
-			ov13b10_ep: endpoint {
+			s5k3l6_ep: endpoint {
 				data-lanes = <1 2 3 4>;
-				link-frequencies = /bits/ 64 <560000000>;
 				remote-endpoint = <&csiphy0_ep>;
 			};
 		};

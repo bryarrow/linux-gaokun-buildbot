@@ -78,4 +78,12 @@ in {
     tristate = "n";
     optional = true;
   };
+
+  # The rear camera on this board is a Samsung S5K3L6, for which mainline has
+  # no driver; patches/camera/0006 adds one. The symbol is new with that patch,
+  # so it is not in the arm64 defconfig and autoModules cannot answer for it --
+  # without this it would default to "n" and the rear camera would be silent.
+  # VIDEO_OV13B10, which the board's other rear module needs, comes from
+  # autoModules on its own.
+  VIDEO_S5K3L6XX = {tristate = "m";};
 }

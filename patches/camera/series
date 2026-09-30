@@ -3,4 +3,4 @@
 0003-clk-qcom-camcc-sc8280xp-mark-camnoc-ahb-rcgs-shared.patch
 0004-media-i2c-ov13b10-of-match-and-gaokun3-power-sequence.patch
 0005-media-qcom-camss-continue-without-never-bound-sensors.patch
-0006-media-i2c-ov13b10-DIAG-scan-the-cci-bus-on-identify-failure.patch
+0006-media-i2c-add-s5k3l6xx-driver.patch
