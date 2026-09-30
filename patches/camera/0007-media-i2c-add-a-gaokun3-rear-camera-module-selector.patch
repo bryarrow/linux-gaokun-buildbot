@@ -1,0 +1,449 @@
+Subject: media: i2c: add a gaokun3 rear camera module selector
+
+The MateBook E Go is built with one of two interchangeable rear camera
+modules, a Samsung S5K3L6 at i2c address 0x10 or an OmniVision OV13B10 at
+0x36. They sit on the same CCI bus, behind the same CSIPHY, on GPIO7 as reset
+and on MCLK4, and the device tree cannot express "either": both nodes cannot
+be enabled, because gpiolib hands a reset line to one consumer only -- the
+driver that loses that race fails on -EBUSY rather than on the hardware it
+does not have -- and the two drivers would fight over the rate of the single
+MCLK.
+
+Keep both sensor nodes disabled instead, and let this driver run the module's
+power sequence once at boot, read the id registers of each candidate and
+register only the node whose module answered. That node's sensor driver then
+probes against an ordinary i2c client with the rails, the reset line and the
+clock all to itself.
+
+The device tree gives this node a "sensors" phandle list of the candidates and
+the same supplies, clock and reset a sensor node carries; those are repeated
+because the sequence has to run before either sensor driver exists.
+
+The CCI adapter runs every message of a transfer on its own (cci_xfer() in
+i2c-qcom-cci.c), so the id read is a register-address write followed by a
+read, the same shape the sensor drivers use.
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 6438caf..46bdfc0 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -780,6 +780,18 @@ config VIDEO_S5K3L6XX
+ 	  This is a V4L2 sensor driver for Samsung S5K3L6XX 13M
+ 	  camera sensor with an embedded SoC image signal processor.
+ 
++config VIDEO_GAOKUN3_CAMERA_SELECT
++	tristate "Huawei MateBook E Go rear camera module selector"
++	depends on I2C && OF
++	help
++	  The Huawei MateBook E Go is shipped with one of two
++	  interchangeable rear camera modules, a Samsung S5K3L6 at i2c
++	  address 0x10 or an OmniVision OV13B10 at 0x36, wired to the
++	  same CCI bus, CSIPHY, reset line and MCLK. This driver powers
++	  the module once at boot and registers only the sensor node
++	  whose module answers, so that one device tree works with
++	  either module.
++
+ config VIDEO_S5K3M5
+ 	tristate "Samsung S5K3M5 sensor support"
+ 	select V4L2_CCI_I2C
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index f3360e9..be07535 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -129,6 +129,7 @@ obj-$(CONFIG_VIDEO_RJ54N1) += rj54n1cb0c.o
+ obj-$(CONFIG_VIDEO_S5C73M3) += s5c73m3/
+ obj-$(CONFIG_VIDEO_S5K3M5) += s5k3m5.o
+ obj-$(CONFIG_VIDEO_S5K3L6XX) += s5k3l6xx.o
++obj-$(CONFIG_VIDEO_GAOKUN3_CAMERA_SELECT) += gaokun3-camera-select.o
+ obj-$(CONFIG_VIDEO_S5K5BAF) += s5k5baf.o
+ obj-$(CONFIG_VIDEO_S5K6A3) += s5k6a3.o
+ obj-$(CONFIG_VIDEO_S5KJN1) += s5kjn1.o
+diff --git a/drivers/media/i2c/gaokun3-camera-select.c b/drivers/media/i2c/gaokun3-camera-select.c
+new file mode 100644
+index 0000000..3aef9da
+--- /dev/null
++++ b/drivers/media/i2c/gaokun3-camera-select.c
+@@ -0,0 +1,384 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Huawei MateBook E Go (SC8280XP, gaokun3) rear camera module selector
++ *
++ * The board is built with one of two interchangeable rear camera modules: a
++ * Samsung S5K3L6 at address 0x10 or an OmniVision OV13B10 at 0x36. Both sit on
++ * the same CCI bus, behind the same CSIPHY, on the same reset line and the same
++ * MCLK, so the device tree cannot simply enable both nodes and let the module
++ * that answers probe: gpiolib hands the reset line to one consumer only, so the
++ * driver that loses that race fails on -EBUSY, and the two drivers would fight
++ * over the rate of the single MCLK.
++ *
++ * Both sensor nodes are therefore disabled and this driver runs the module's
++ * power sequence once, reads the id registers of each candidate and registers
++ * only the node whose module answered. That node's sensor driver then probes
++ * against an ordinary i2c client, with the rails and the reset line all to
++ * itself.
++ *
++ * Copyright (C) 2026 berry.cn@outlook.com
++ */
++
++#include <linux/clk.h>
++#include <linux/cleanup.h>
++#include <linux/delay.h>
++#include <linux/device.h>
++#include <linux/err.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/mod_devicetable.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++#include <linux/string.h>
++#include <linux/types.h>
++
++/*
++ * A candidate is present when the id register its driver reads answers with the
++ * value that driver expects: s5k3l6xx reads the two model-id bytes at
++ * 0x0000/0x0001, ov13b10 the three chip-id bytes at 0x300a.
++ */
++static const struct gaokun3_camera_module {
++	const char *compatible;
++	u16 id_reg;
++	u8 id_len;
++	u32 id;
++} gaokun3_camera_modules[] = {
++	{ "samsung,s5k3l6xx", 0x0000, 2, 0x30c6 },
++	{ "ovti,ov13b10", 0x300a, 3, 0x560d42 },
++};
++
++/* Windows CAMS_RES_QRD.bin; both module datasheets agree on the order. */
++static const char * const gaokun3_camera_supplies[] = {
++	"vdda", "vddio", "vddd",
++};
++
++#define GAOKUN3_CAMERA_SUPPLY_VDDA	0
++#define GAOKUN3_CAMERA_MCLK_RATE	24000000
++
++struct gaokun3_camera_power {
++	struct clk *mclk;
++	struct gpio_desc *reset;
++	struct regulator_bulk_data supplies[ARRAY_SIZE(gaokun3_camera_supplies)];
++	bool clk_on;
++	bool rails_on;
++};
++
++struct gaokun3_camera_select {
++	struct i2c_client *client;
++};
++
++/*
++ * The CCI adapter runs every message of a transfer on its own (cci_xfer() in
++ * i2c-qcom-cci.c), so the register address goes out as a write and the value
++ * comes back with the read that follows it, exactly as the sensor drivers read
++ * theirs.
++ */
++static int gaokun3_camera_read_id(struct i2c_adapter *adap, u16 addr, u16 reg,
++				  u8 *val, unsigned int len)
++{
++	u8 reg_buf[2] = { reg >> 8, reg & 0xff };
++	struct i2c_msg msgs[] = {
++		{
++			.addr = addr,
++			.flags = 0,
++			.len = sizeof(reg_buf),
++			.buf = reg_buf,
++		}, {
++			.addr = addr,
++			.flags = I2C_M_RD,
++			.len = len,
++			.buf = val,
++		},
++	};
++	int ret;
++
++	ret = i2c_transfer(adap, msgs, ARRAY_SIZE(msgs));
++	if (ret < 0)
++		return ret;
++
++	return ret == ARRAY_SIZE(msgs) ? 0 : -EIO;
++}
++
++static int gaokun3_camera_power_on(struct gaokun3_camera_power *power)
++{
++	int ret;
++
++	/* Reset stays asserted while the rails come up and is released before
++	 * MCLK starts, as in the board's own power table.
++	 */
++	gpiod_set_value_cansleep(power->reset, 1);
++
++	/* vdda is LDO2_B, shared with the panel's vddi, which votes 1.8V. */
++	ret = regulator_set_voltage(power->supplies[GAOKUN3_CAMERA_SUPPLY_VDDA].consumer,
++				    2800000, 2800000);
++	if (ret)
++		return ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(power->supplies), power->supplies);
++	if (ret)
++		return ret;
++
++	power->rails_on = true;
++
++	usleep_range(1000, 2000);
++
++	gpiod_set_value_cansleep(power->reset, 0);
++
++	usleep_range(10000, 11000);
++
++	ret = clk_set_rate(power->mclk, GAOKUN3_CAMERA_MCLK_RATE);
++	if (ret)
++		return ret;
++
++	ret = clk_prepare_enable(power->mclk);
++	if (ret)
++		return ret;
++
++	power->clk_on = true;
++
++	/* The id registers answer once MCLK is running. */
++	usleep_range(10000, 11000);
++
++	return 0;
++}
++
++static void gaokun3_camera_power_off(struct gaokun3_camera_power *power)
++{
++	if (power->clk_on) {
++		clk_disable_unprepare(power->mclk);
++		power->clk_on = false;
++	}
++
++	gpiod_set_value_cansleep(power->reset, 1);
++
++	if (!power->rails_on)
++		return;
++
++	regulator_bulk_disable(ARRAY_SIZE(power->supplies), power->supplies);
++
++	/*
++	 * Hand the 2.8V request on the shared rail back, or the next consumer
++	 * to enable it -- the panel's vddi votes 1.8V -- would be dragged up.
++	 */
++	regulator_set_voltage(power->supplies[GAOKUN3_CAMERA_SUPPLY_VDDA].consumer,
++			      1800000, 2800000);
++	power->rails_on = false;
++}
++
++static struct device_node *gaokun3_camera_find(struct device *dev,
++					       struct i2c_adapter *adap,
++					       u16 *addr)
++{
++	unsigned int i, j;
++	int count;
++
++	count = of_count_phandle_with_args(dev->of_node, "sensors", NULL);
++	if (count <= 0) {
++		dev_err(dev, "no candidate sensor nodes\n");
++		return NULL;
++	}
++
++	for (i = 0; i < count; i++) {
++		struct device_node *sensor __free(device_node) =
++			of_parse_phandle(dev->of_node, "sensors", i);
++		const struct gaokun3_camera_module *module = NULL;
++		u8 val[3] = {};
++		u32 id = 0;
++		u32 reg;
++		int ret;
++
++		if (!sensor)
++			continue;
++
++		for (j = 0; j < ARRAY_SIZE(gaokun3_camera_modules); j++) {
++			if (of_device_is_compatible(sensor,
++						    gaokun3_camera_modules[j].compatible)) {
++				module = &gaokun3_camera_modules[j];
++				break;
++			}
++		}
++
++		if (!module) {
++			dev_warn(dev, "%pOF: not a rear camera module\n", sensor);
++			continue;
++		}
++
++		if (of_property_read_u32(sensor, "reg", &reg) || reg > 0xffff) {
++			dev_warn(dev, "%pOF: no usable reg\n", sensor);
++			continue;
++		}
++
++		ret = gaokun3_camera_read_id(adap, reg, module->id_reg, val,
++					     module->id_len);
++		if (ret) {
++			dev_info(dev, "%pOF: nothing at 0x%02x (%d)\n",
++				 sensor, reg, ret);
++			continue;
++		}
++
++		for (j = 0; j < module->id_len; j++)
++			id = (id << 8) | val[j];
++
++		if (id != module->id) {
++			dev_info(dev, "%pOF: id 0x%x at 0x%02x is not 0x%x\n",
++				 sensor, id, reg, module->id);
++			continue;
++		}
++
++		dev_info(dev, "%pOF: rear camera module at 0x%02x\n", sensor, reg);
++		*addr = reg;
++		return_ptr(sensor);
++	}
++
++	return NULL;
++}
++
++/*
++ * The i2c core names the device after the driver it matches. Filling the board
++ * info with the compatible's driver name keeps that name ("s5k3l6xx 1-0010")
++ * even though the node is registered by hand rather than by the OF bus code.
++ */
++static void gaokun3_camera_client_name(struct device_node *node, char *name,
++				       size_t len)
++{
++	const char *compatible;
++	const char *vendor;
++
++	if (of_property_read_string(node, "compatible", &compatible)) {
++		strscpy(name, "gaokun3-camera", len);
++		return;
++	}
++
++	vendor = strchr(compatible, ',');
++	strscpy(name, vendor ? vendor + 1 : compatible, len);
++}
++
++static int gaokun3_camera_select_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct gaokun3_camera_select *select;
++	struct gaokun3_camera_power power = {};
++	struct device_node *sensor;
++	struct device_node *parent;
++	struct i2c_board_info info = {};
++	struct i2c_adapter *adap;
++	unsigned int i;
++	u16 addr = 0;
++	int ret;
++
++	select = devm_kzalloc(dev, sizeof(*select), GFP_KERNEL);
++	if (!select)
++		return -ENOMEM;
++
++	platform_set_drvdata(pdev, select);
++
++	for (i = 0; i < ARRAY_SIZE(power.supplies); i++)
++		power.supplies[i].supply = gaokun3_camera_supplies[i];
++
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(power.supplies),
++				      power.supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "no module supplies\n");
++
++	power.mclk = devm_clk_get(dev, "mclk");
++	if (IS_ERR(power.mclk))
++		return dev_err_probe(dev, PTR_ERR(power.mclk), "no MCLK\n");
++
++	/*
++	 * The reset line is the one resource the sensor driver cannot share, so
++	 * it is requested without devres and handed back before the client is
++	 * registered.
++	 */
++	power.reset = gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(power.reset))
++		return dev_err_probe(dev, PTR_ERR(power.reset), "no reset GPIO\n");
++
++	parent = of_parse_phandle(dev->of_node, "i2c-parent", 0);
++	if (!parent) {
++		dev_err(dev, "no i2c-parent\n");
++		ret = -EINVAL;
++		goto out_put_reset;
++	}
++
++	adap = of_get_i2c_adapter_by_node(parent);
++	of_node_put(parent);
++	if (!adap) {
++		ret = -EPROBE_DEFER;
++		goto out_put_reset;
++	}
++
++	ret = gaokun3_camera_power_on(&power);
++	if (ret) {
++		gaokun3_camera_power_off(&power);
++		dev_err_probe(dev, ret, "powering the rear camera module failed\n");
++		goto out_put_adapter;
++	}
++
++	sensor = gaokun3_camera_find(dev, adap, &addr);
++
++	gaokun3_camera_power_off(&power);
++	gpiod_put(power.reset);
++
++	if (!sensor) {
++		dev_warn(dev, "no rear camera module answered, the rear camera is unavailable\n");
++		i2c_put_adapter(adap);
++		return 0;
++	}
++
++	info.addr = addr;
++	info.fwnode = of_fwnode_handle(sensor);
++	gaokun3_camera_client_name(sensor, info.type, sizeof(info.type));
++
++	select->client = i2c_new_client_device(adap, &info);
++
++	of_node_put(sensor);
++	i2c_put_adapter(adap);
++
++	if (IS_ERR(select->client)) {
++		ret = PTR_ERR(select->client);
++		select->client = NULL;
++		return dev_err_probe(dev, ret, "registering the rear camera failed\n");
++	}
++
++	return 0;
++
++out_put_adapter:
++	gpiod_put(power.reset);
++	i2c_put_adapter(adap);
++
++	return ret;
++
++out_put_reset:
++	gpiod_put(power.reset);
++
++	return ret;
++}
++
++static void gaokun3_camera_select_remove(struct platform_device *pdev)
++{
++	struct gaokun3_camera_select *select = platform_get_drvdata(pdev);
++
++	i2c_unregister_device(select->client);
++}
++
++static const struct of_device_id gaokun3_camera_select_of_match[] = {
++	{ .compatible = "huawei,gaokun3-rear-camera-select" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, gaokun3_camera_select_of_match);
++
++static struct platform_driver gaokun3_camera_select_driver = {
++	.probe = gaokun3_camera_select_probe,
++	.remove = gaokun3_camera_select_remove,
++	.driver = {
++		.name = "gaokun3-rear-camera-select",
++		.of_match_table = gaokun3_camera_select_of_match,
++	},
++};
++module_platform_driver(gaokun3_camera_select_driver);
++
++MODULE_AUTHOR("berry.cn@outlook.com");
++MODULE_DESCRIPTION("Huawei MateBook E Go rear camera module selector");
++MODULE_LICENSE("GPL");
