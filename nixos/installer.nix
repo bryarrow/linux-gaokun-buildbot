@@ -120,6 +120,14 @@
     ++ [{source = esp; target = "/boot/efi.img";}];
 in
   lib.mkIf (config.isoImage.makeEfiBootable && deviceTree.enable && deviceTree.name != null) {
+    # The stock minimal installer enables hardware.enableAllHardware, whose
+    # aarch64 initrd list names early-KMS modules for other SoCs (Rockchip's
+    # dw-hdmi, sun4i-drm, vc4, ...). linux-gaokun3 deliberately does not build
+    # those, and makeModulesClosure would otherwise fail on the first absent
+    # name. Skip missing modules for the live medium only; the installed system
+    # keeps the strict default, so a missing gaokun3 module still fails there.
+    boot.initrd.allowMissingModules = true;
+
     # checks.installer-wiring reads the entry back out of this image.
     system.build.gaokun3InstallerEsp = esp;
 
