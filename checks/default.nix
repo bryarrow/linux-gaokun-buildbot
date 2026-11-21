@@ -426,7 +426,7 @@ in {
     touch $out
   '';
 
-  # Building this forces every package, and the kernel's `modules` output
+  # Building this forces the base packages, and the kernel's `modules` output
   # explicitly. A linkFarm only realises each package's default output, so `out`
   # would be cached while `modules` — which the system closure and the initrd
   # need — was not, and a device would still compile the kernel to get it. The
@@ -439,12 +439,16 @@ in {
   # image plus its squashfs would evict kernels from a 5 GB cache by design
   # (README's quota section). checks.installer-wiring still builds the ESP and
   # reads the entry back, which is what can actually be wrong in the installer.
+  #
+  # linux-gaokun3-el2 is also excluded: it is a second complete kernel compile,
+  # and the workflow builds its `out` and `modules` in a parallel `el2` job, so
+  # wall-clock time is the slower of the two kernels rather than their sum. The
+  # EL2 cache entry is still produced there.
   packages = pkgs.linkFarm "gaokun3-packages" (
     lib.mapAttrsToList (name: path: {inherit name path;})
-    (lib.removeAttrs self.packages.${system} ["installer-iso"])
+    (lib.removeAttrs self.packages.${system} ["installer-iso" "linux-gaokun3-el2"])
     ++ [
       {name = "linux-gaokun3-modules"; path = kernel.modules;}
-      {name = "linux-gaokun3-el2-modules"; path = el2Kernel.modules;}
     ]
   );
 })

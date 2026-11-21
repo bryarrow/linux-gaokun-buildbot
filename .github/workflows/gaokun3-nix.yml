@@ -64,9 +64,40 @@ jobs:
           nix flake check --no-build
           nix build --no-link '.#checks.aarch64-linux.config-symbols'
 
-      # checks.packages forces every package output, so this is the build that
-      # populates the cache. The Cachix daemon pushes store paths as they are
-      # built; no separate `cachix push` is needed.
+      # checks.packages forces the base package outputs, so this is the build
+      # that populates the cache. The Cachix daemon pushes store paths as they
+      # are built; no separate `cachix push` is needed. The EL2 kernel is a
+      # second full compile and lives in the parallel `el2` job below.
       - name: Check, build and push (main and manual runs)
         if: github.event_name != 'pull_request'
         run: nix flake check
+
+  # linux-gaokun3-el2 is a second complete kernel tree, not a rebuild of the
+  # base objects. It is excluded from checks.packages so this job can build it
+  # concurrently with the base check: wall-clock time is the slower of the two
+  # kernels rather than their sum, and both jobs push to the same cache. The
+  # cost is another runner for the duration of the build.
+  el2:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 360
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Set up the gaokun3 binary cache
+        uses: cachix/cachix-action@v17
+        with:
+          name: gaokun3
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          pushFilter: '(-dev$|-source$|linux-gaokun3-src)'
+          skipPush: false
+
+      - name: Build the EL2 kernel and its modules
+        run: |
+          nix build --no-link \
+            '.#packages.aarch64-linux.linux-gaokun3-el2' \
+            '.#packages.aarch64-linux.linux-gaokun3-el2.modules'
