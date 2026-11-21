@@ -62,7 +62,7 @@ new file mode 100644
 index 0000000..3aef9da
 --- /dev/null
 +++ b/drivers/media/i2c/gaokun3-camera-select.c
-@@ -0,0 +1,384 @@
+@@ -0,0 +1,392 @@
 +// SPDX-License-Identifier: GPL-2.0-only
 +/*
 + * Huawei MateBook E Go (SC8280XP, gaokun3) rear camera module selector
@@ -132,6 +132,12 @@ index 0000000..3aef9da
 +
 +struct gaokun3_camera_select {
 +	struct i2c_client *client;
++	/*
++	 * devres owns the bulk-regulator array until the platform device is
++	 * removed, so it must live here (devm-allocated with select), not on
++	 * the probe stack: a deferred probe frees devres after probe returns.
++	 */
++	struct gaokun3_camera_power power;
 +};
 +
 +/*
@@ -324,7 +330,7 @@ index 0000000..3aef9da
 +{
 +	struct device *dev = &pdev->dev;
 +	struct gaokun3_camera_select *select;
-+	struct gaokun3_camera_power power = {};
++	struct gaokun3_camera_power *power;
 +	struct device_node *sensor;
 +	struct device_node *parent;
 +	struct i2c_board_info info = {};
@@ -339,26 +345,28 @@ index 0000000..3aef9da
 +
 +	platform_set_drvdata(pdev, select);
 +
-+	for (i = 0; i < ARRAY_SIZE(power.supplies); i++)
-+		power.supplies[i].supply = gaokun3_camera_supplies[i];
++	power = &select->power;
 +
-+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(power.supplies),
-+				      power.supplies);
++	for (i = 0; i < ARRAY_SIZE(power->supplies); i++)
++		power->supplies[i].supply = gaokun3_camera_supplies[i];
++
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(power->supplies),
++				      power->supplies);
 +	if (ret)
 +		return dev_err_probe(dev, ret, "no module supplies\n");
 +
-+	power.mclk = devm_clk_get(dev, "mclk");
-+	if (IS_ERR(power.mclk))
-+		return dev_err_probe(dev, PTR_ERR(power.mclk), "no MCLK\n");
++	power->mclk = devm_clk_get(dev, "mclk");
++	if (IS_ERR(power->mclk))
++		return dev_err_probe(dev, PTR_ERR(power->mclk), "no MCLK\n");
 +
 +	/*
 +	 * The reset line is the one resource the sensor driver cannot share, so
 +	 * it is requested without devres and handed back before the client is
 +	 * registered.
 +	 */
-+	power.reset = gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
-+	if (IS_ERR(power.reset))
-+		return dev_err_probe(dev, PTR_ERR(power.reset), "no reset GPIO\n");
++	power->reset = gpiod_get_optional(dev, "reset", GPIOD_OUT_LOW);
++	if (IS_ERR(power->reset))
++		return dev_err_probe(dev, PTR_ERR(power->reset), "no reset GPIO\n");
 +
 +	parent = of_parse_phandle(dev->of_node, "i2c-parent", 0);
 +	if (!parent) {
@@ -374,17 +382,17 @@ index 0000000..3aef9da
 +		goto out_put_reset;
 +	}
 +
-+	ret = gaokun3_camera_power_on(&power);
++	ret = gaokun3_camera_power_on(power);
 +	if (ret) {
-+		gaokun3_camera_power_off(&power);
++		gaokun3_camera_power_off(power);
 +		dev_err_probe(dev, ret, "powering the rear camera module failed\n");
 +		goto out_put_adapter;
 +	}
 +
 +	sensor = gaokun3_camera_find(dev, adap, &addr);
 +
-+	gaokun3_camera_power_off(&power);
-+	gpiod_put(power.reset);
++	gaokun3_camera_power_off(power);
++	gpiod_put(power->reset);
 +
 +	if (!sensor) {
 +		dev_warn(dev, "no rear camera module answered, the rear camera is unavailable\n");
@@ -410,13 +418,13 @@ index 0000000..3aef9da
 +	return 0;
 +
 +out_put_adapter:
-+	gpiod_put(power.reset);
++	gpiod_put(power->reset);
 +	i2c_put_adapter(adap);
 +
 +	return ret;
 +
 +out_put_reset:
-+	gpiod_put(power.reset);
++	gpiod_put(power->reset);
 +
 +	return ret;
 +}

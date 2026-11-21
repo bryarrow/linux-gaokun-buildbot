@@ -720,7 +720,7 @@ index 0000000..86276c5
 +	/*
 +	 * gaokun3: follow the board's own (Windows CAMS_RES_QRD) sequence:
 +	 *   reset asserted -> rails (LDO2_B 2.8V / LDO2_C 1.8V / core) -> 1ms
-+	 *   -> reset released -> 10ms -> MCLK 24MHz -> 1ms.
++	 *   -> reset released -> 10ms -> MCLK 25MHz -> 1ms.
 +	 * The analogue rail (LDO2_B) is shared with the display panel's VDDI,
 +	 * which votes 1.8V; request 2.8V here (RPMh takes the max, exactly as
 +	 * Windows does) and hand the range back in power_off().
@@ -1049,7 +1049,7 @@ index 0000000..86276c5
 +#define MIPI_CLOCK(extclk, div, multiplier, scaler) ((extclk / div * multiplier) >> scaler)
 +
 +/*
-+ * The link-frequency menu depends on the board's MCLK (24 MHz on the
++ * The link-frequency menu depends on the board's MCLK (25 MHz on the
 + * gaokun3), so it is filled in at probe time in
 + * s5k3l6xx_initialize_ctrls().
 + */

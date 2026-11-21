@@ -102,9 +102,15 @@ in {
       grep -q 'remote-endpoint = <&s5k3l6_ep>;' "$dts"
       grep -q 'remote-endpoint = <&ov13b10_ep>;' "$dts"
 
-      # MCLK4 is 24 MHz; keep the endpoint's rates in step with the driver's
-      # runtime V4L2_CID_LINK_FREQ menu (324/600 MHz).
-      grep -q 'link-frequencies = /bits/ 64 <324000000 600000000>;' "$dts"
+      # The sensor streams only at 25 MHz, the Librem5 driver's PLL table;
+      # at the board table's 24 MHz it identifies itself and then produces no
+      # frames. The endpoint rates follow from that MCLK and match the
+      # driver's runtime V4L2_CID_LINK_FREQ menu (337.5/625 MHz), while the
+      # selector keeps 24 MHz for the id read.
+      grep -q 'clock-frequency = <25000000>;' "$dts"
+      grep -q 'assigned-clock-rates = <25000000>;' "$dts"
+      grep -q 'clock-frequency = <24000000>;' "$dts"
+      grep -q 'link-frequencies = /bits/ 64 <337500000 625000000>;' "$dts"
 
       grep -q 'compatible = "hynix,hi846"' "$dts"
 

@@ -233,12 +233,20 @@
 		reg = <0x10>;
 		status = "disabled";
 
+		/*
+		 * The Windows table names 24 MHz, and that is enough for the
+		 * selector to power the module and read its id, but the
+		 * Librem5 driver's streaming PLL is the 25 MHz configuration:
+		 * at 24 MHz the sensor answers and then produces no frames.
+		 * power_on() re-clocks MCLK4 from this node's clock-frequency,
+		 * so ask for 25 MHz and carry the matching link rates below.
+		 */
 		clocks = <&camcc CAMCC_MCLK4_CLK>;
 		clock-names = "mclk";
-		clock-frequency = <24000000>;
+		clock-frequency = <25000000>;
 
 		assigned-clocks = <&camcc CAMCC_MCLK4_CLK>;
-		assigned-clock-rates = <24000000>;
+		assigned-clock-rates = <25000000>;
 
 		rstn-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
 
@@ -261,13 +269,12 @@
 				data-lanes = <1 2 3 4>;
 
 				/*
-				 * The board clocks MCLK4 at 24 MHz; the driver
-				 * computes its V4L2_CID_LINK_FREQ menu from
-				 * clock-frequency, so state the actual rates
-				 * here as well.
-				 * 24 MHz / 4 * 108 >> 1 and 24 MHz / 4 * 100.
+				 * 25 MHz / 4 * 108 >> 1 and 25 MHz / 4 * 100.
+				 * The driver computes its V4L2_CID_LINK_FREQ
+				 * menu from clock-frequency, so state the same
+				 * rates here for CAMSS.
 				 */
-				link-frequencies = /bits/ 64 <324000000 600000000>;
+				link-frequencies = /bits/ 64 <337500000 625000000>;
 
 				remote-endpoint = <&csiphy0_ep>;
 			};
@@ -311,9 +318,11 @@
  * Rear camera module selector, see gaokun3-camera-select.c: it runs the
  * module's power sequence once, reads the id registers of the two candidates
  * above and registers only the node whose module answered, so one device tree
- * and one kernel serve both module variants. Its supplies, clock and reset are
- * the same ones the sensor nodes carry, because the sequence has to run before
- * either sensor driver can be bound.
+ * and one kernel serve both module variants. Its supplies and reset are the
+ * same ones the sensor nodes carry, because the sequence has to run before
+ * either sensor driver can be bound. It reads the ids at 24 MHz, the rate the
+ * Windows table names; the sensor driver then moves MCLK4 to 25 MHz for
+ * streaming.
  */
 / {
 	rear_camera_select: rear-camera-select {
@@ -327,6 +336,10 @@
 
 		clocks = <&camcc CAMCC_MCLK4_CLK>;
 		clock-names = "mclk";
+		/*
+		 * The id registers answer at 24 MHz, so the selector does not
+		 * depend on the sensor node's 25 MHz streaming rate.
+		 */
 		clock-frequency = <24000000>;
 
 		reset-gpios = <&tlmm 7 GPIO_ACTIVE_LOW>;
