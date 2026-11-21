@@ -6,3 +6,9 @@
 0006-arm64-dts-qcom-sc8280xp-add-CPU-cooling-maps-at-75-C.patch
 0007-platform-arm64-huawei-gaokun-ec-register-hwmon-as-thermal-sensor.patch
 0008-efi-pstore-register-backend-when-efivars-ops-arrive-late.patch
+0009-platform-arm64-huawei-gaokun-ec-disable-irq-across-suspend.patch
+0010-platform-arm64-huawei-gaokun-ec-report-the-real-lid-state-on-resume.patch
+0011-platform-arm64-huawei-gaokun-ec-use-an-edge-triggered-irq-while-suspended.patch
+0012-pci-qcom-keep-an-active-only-pcie-mem-vote-in-l2-on-sc8280xp.patch
+0013-pci-allow-d3-for-native-hotplug-capable-root-ports-on-non-x86.patch
+0014-serial-qcom-geni-add-force-suspend-resume-to-system-sleep-callbacks.patch

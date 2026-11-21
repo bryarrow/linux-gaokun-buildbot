@@ -10,3 +10,4 @@
 0021-media-hi846-fix-link-frequency-handling.patch
 0022-media-hi846-Add-6MP-and-8MP-modes-support.patch
 0023-media-hi846-fix-modes-handling-for-different-lane-ca.patch
+0024-drm-msm-a6xx-reset-preemption-records-across-suspend.patch

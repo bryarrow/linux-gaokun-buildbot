@@ -14,6 +14,8 @@
 #include <linux/hwmon-sysfs.h>
 #include <linux/i2c.h>
 #include <linux/input.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/notifier.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -123,6 +125,7 @@ struct gaokun_ec {
 	struct gpio_desc *enable_gpio;
 	bool lid_opened;
 	bool suspended;
+	u32 irq_type;
 };
 
 static int gaokun_ec_request(struct gaokun_ec *ec, const u8 *req,
@@ -621,6 +624,33 @@ static const struct hwmon_chip_info gaokun_ec_hwmon_chip_info = {
 /* -------------------------------------------------------------------------- */
 /* Modern Standby */
 
+/*
+ * With the SoC in its deepest s2idle state, a level IRQ misses EC events such
+ * as plugging in a charger: the PDC keeps waking the SoC, but the line is high
+ * again whenever a CPU looks, and nothing becomes pending at the GIC. The EC
+ * seems to signal with short low pulses there. With a falling edge, which the
+ * PDC passes on to the GIC as an edge, those events wake the system. A
+ * permanent edge would lose events while awake, when the line can already be
+ * low as the IRQ gets enabled, so use the edge only while suspended. Awake,
+ * the level IRQ is expected to fire again until the events are read, which
+ * the handler has always relied on.
+ */
+static void gaokun_ec_irq_edge(struct gaokun_ec *ec, bool edge)
+{
+	u32 type = ec->irq_type;
+	int ret;
+
+	if (!(type & IRQ_TYPE_LEVEL_MASK))
+		return;	/* an edge already, or not known */
+	if (edge)
+		type = type == IRQ_TYPE_LEVEL_LOW ? IRQ_TYPE_EDGE_FALLING :
+						    IRQ_TYPE_EDGE_RISING;
+
+	ret = irq_set_irq_type(ec->client->irq, type);
+	if (ret)
+		dev_warn(&ec->client->dev, "Failed to set the IRQ type: %d\n", ret);
+}
+
 static int gaokun_ec_suspend(struct device *dev)
 {
 	struct gaokun_ec *ec = dev_get_drvdata(dev);
@@ -630,9 +660,22 @@ static int gaokun_ec_suspend(struct device *dev)
 	if (ec->suspended)
 		return 0;
 
+	/*
+	 * The handler cannot read the EC in standby, and the IRQ is level
+	 * triggered: it would fire again as soon as the handler returned.
+	 * Keep it disabled until resume. An event raised meanwhile keeps the
+	 * line asserted, and the handler reads it once resume enables the
+	 * IRQ again. As a wakeup IRQ it still wakes the system: the PDC has
+	 * the irq core enable disabled wakeup IRQs for suspend
+	 * (IRQCHIP_ENABLE_WAKEUP_ON_SUSPEND).
+	 */
+	disable_irq(ec->client->irq);
+
 	ret = gaokun_ec_write(ec, ec_req);
-	if (ret)
+	if (ret) {
+		enable_irq(ec->client->irq);
 		return ret;
+	}
 
 	msleep(100);
 	gpiod_set_value(ec->enable_gpio, 0);
@@ -642,15 +685,37 @@ static int gaokun_ec_suspend(struct device *dev)
 	return 0;
 }
 
+/*
+ * By now the PM core has enabled the IRQ for wakeup, still level triggered:
+ * if the EC holds the line low for an event raised since gaokun_ec_suspend(),
+ * that has already been recorded as a wakeup and the suspend will be aborted.
+ * Switch to the edge only from here on. An event whose pulse ended while the
+ * IRQ was disabled, or one that asserts during the switch itself, wakes
+ * nothing; resume reads it, and a repeated pulse from the EC still wakes.
+ */
+static int gaokun_ec_suspend_noirq(struct device *dev)
+{
+	struct gaokun_ec *ec = dev_get_drvdata(dev);
+
+	if (ec->suspended)
+		gaokun_ec_irq_edge(ec, true);
+
+	return 0;
+}
+
 static int gaokun_ec_resume(struct device *dev)
 {
 	struct gaokun_ec *ec = dev_get_drvdata(dev);
 	u8 ec_req[] = MKREQ(0x02, EC_STANDBY_REG, 1, EC_STANDBY_EXIT);
+	u8 status;
 	int ret;
 	int i;
 
 	if (!ec->suspended)
 		return 0;
+
+	/* Level again before anything can return, the IRQ is still disabled. */
+	gaokun_ec_irq_edge(ec, false);
 
 	gpiod_set_value(ec->enable_gpio, 1);
 	msleep(100);
@@ -666,12 +731,24 @@ static int gaokun_ec_resume(struct device *dev)
 	if (ret)
 		return ret;
 
-	/* Resume may be unstable, so open lid anyways */
-	input_report_switch(ec->idev, SW_LID, 0);
-	input_sync(ec->idev);
-	ec->lid_opened = true;
+	/*
+	 * Any wakeup source ends up here, so report the lid as the EC sees it:
+	 * a wakeup with the lid closed must not look like the lid opening.
+	 * If the read fails, keep the last state.
+	 */
+	if (!gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status)) {
+		ec->lid_opened = !!(status & EC_LID_OPEN);
+		input_report_switch(ec->idev, SW_LID, !ec->lid_opened);
+		input_sync(ec->idev);
+	}
 
 	ec->suspended = false;
+	enable_irq(ec->client->irq);
+	/*
+	 * The edge that woke the system is not replayed for a level IRQ, and
+	 * the line may be high again with events still queued: read them.
+	 */
+	irq_wake_thread(ec->client->irq, ec);
 
 	return 0;
 }
@@ -729,27 +806,18 @@ static int gaokun_aux_init(struct device *parent, const char *name,
 /* -------------------------------------------------------------------------- */
 /* EC */
 
-static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
+/* An upper bound only, in case the EC keeps answering with events. */
+#define EC_MAX_EVENTS		16
+
+static void gaokun_ec_handle_event(struct gaokun_ec *ec, u8 id)
 {
-	struct gaokun_ec *ec = data;
-	u8 ec_req[] = MKREQ(EC_EVENT, EC_QUERY, 0);
-	u8 status, id;
-	int ret;
-
-	/* EC IO here before resume will fail at the first time, so ignore it */
-	if (ec->suspended)
-		return IRQ_HANDLED;
-
-	ret = gaokun_ec_read_byte(ec, ec_req, &id);
-	if (ret)
-		return IRQ_HANDLED;
+	u8 status;
 
 	switch (id) {
-	case 0x0: /* No event */
-		break;
-
 	case EC_EVENT_LID:
-		gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status);
+		if (gaokun_ec_psy_read_byte(ec, EC_LID_STATE, &status))
+			break;
+
 		status &= EC_LID_OPEN;
 		if (ec->lid_opened != !!status) {
 			input_report_switch(ec->idev, SW_LID, !status);
@@ -760,6 +828,26 @@ static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
 
 	default:
 		blocking_notifier_call_chain(&ec->notifier_list, id, ec);
+	}
+}
+
+/*
+ * Read events until the EC has none left. The IRQ is level triggered while
+ * this runs, so stopping early with an event left is expected to make it fire
+ * again. After resume the handler runs once without an interrupt, and then the
+ * line may already be high with several events queued.
+ */
+static irqreturn_t gaokun_ec_irq_handler(int irq, void *data)
+{
+	struct gaokun_ec *ec = data;
+	u8 ec_req[] = MKREQ(EC_EVENT, EC_QUERY, 0);
+	u8 id;
+	int i;
+
+	for (i = 0; i < EC_MAX_EVENTS; i++) {
+		if (gaokun_ec_read_byte(ec, ec_req, &id) || !id) /* 0: no event */
+			break;
+		gaokun_ec_handle_event(ec, id);
 	}
 
 	return IRQ_HANDLED;
@@ -816,6 +904,7 @@ static int gaokun_ec_probe(struct i2c_client *client)
 					dev_name(dev), ec);
 	if (ret)
 		return dev_err_probe(dev, ret, "Failed to request IRQ\n");
+	ec->irq_type = irq_get_trigger_type(client->irq);
 
 	ec->hwmon_dev = devm_hwmon_device_register_with_info(dev, "gaokun_ec_hwmon",
 							     ec, &gaokun_ec_hwmon_chip_info, NULL);
@@ -840,6 +929,7 @@ MODULE_DEVICE_TABLE(of, gaokun_ec_of_match);
 
 static const struct dev_pm_ops gaokun_ec_pm_ops = {
 	SYSTEM_SLEEP_PM_OPS(gaokun_ec_suspend, gaokun_ec_resume)
+	NOIRQ_SYSTEM_SLEEP_PM_OPS(gaokun_ec_suspend_noirq, NULL)
 };
 
 static struct i2c_driver gaokun_ec_driver = {
