@@ -24,7 +24,8 @@ No test suite exists. The real verification is a CI run plus a boot on the devic
 - `flake.nix` — Outputs: packages, overlay, NixOS module, checks, installer ISO.
 - `nix/pins.nix` — Kernel tag/version/tarball/hash, the single source of truth.
 - `nix/lib/patch-series.nix` — Reads `patches/*/series`; throws at evaluation if a directory and its series disagree.
-- `nix/config/gaokun3-extra.nix` — The reviewed kernel-config delta over nixpkgs' common config.
+- `nix/config/gaokun3-extra.nix` — The reviewed kernel-config delta that enables what the board needs.
+- `nix/config/gaokun3-minimal.nix` — The complement: disables hardware that cannot exist on this board (other arm64 SoCs, discrete GPUs) so the arm64 defconfig does not compile it.
 - `pkgs/` — Kernel, EL2 kernel, firmware, tools, ALSA UCM.
 - `nixos/modules/hardware/gaokun3.nix` — The `hardware.gaokun3` module.
 - `nixos/installer.nix` — The installation medium's systemd-boot ESP.

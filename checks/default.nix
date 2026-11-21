@@ -364,6 +364,20 @@ in {
       }
     done
 
+    # nix/config/gaokun3-minimal.nix removes hardware that cannot exist on this
+    # board. ARCH_QCOM and DRM_MSM must survive, while the platform menu entry
+    # for every other SoC and the discrete GPUs must not come back. These are
+    # the high-impact symbols; the file itself carries the full list.
+    grep -qx 'CONFIG_ARCH_QCOM=y' "$cfg"
+    grep -qx 'CONFIG_DRM_MSM=m' "$cfg"
+    for sym in ARCH_TEGRA DRM_NOUVEAU DRM_AMDGPU DRM_XE DRM_RADEON \
+               DRM_PANFROST DRM_LIMA DRM_ETNAVIV FB_NVIDIA; do
+      grep -qx "# CONFIG_$sym is not set" "$cfg" || {
+        echo "unusable hardware symbol CONFIG_$sym is enabled" >&2
+        exit 1
+      }
+    done
+
     # TCG_TPM is pinned to a module and INTEGRITY stays off. A builtin TPM core
     # makes /sys/class/tpmrm exist from boot, and systemd's tpm2 generator then
     # waits the full 90 s device timeout for a /dev/tpm0 this machine cannot

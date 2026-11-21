@@ -72,15 +72,17 @@ in
       modDirVersion = "${pins.kernelVersion}${localVersion}";
 
       # The kernel's own arm64 defconfig plus nixpkgs' common config is the
-      # distribution policy; nix/config/gaokun3-extra.nix is the reviewed
-      # Gaokun deviation.
+      # distribution policy; gaokun3-extra.nix enables the board and
+      # gaokun3-minimal.nix removes the other arm64 platforms and the discrete
+      # GPUs that the defconfig would otherwise compile for this one.
       defconfig = "defconfig";
       enableCommonConfig = true;
-      # The variant is the same distribution policy, so the reviewed deviation is
+      # The variant is the same distribution policy, so both fragments are
       # imported unchanged and only LOCALVERSION is restated: it is what makes
       # the module directory, and so the boot entry, distinct.
       structuredExtraConfig =
         (import ../../nix/config/gaokun3-extra.nix {inherit lib;})
+        // (import ../../nix/config/gaokun3-minimal.nix {inherit lib;})
         // {LOCALVERSION = {freeform = localVersion;};};
 
       # generate-config.pl's checks stay at their defaults, so an option that

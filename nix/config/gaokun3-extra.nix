@@ -3,9 +3,10 @@
 # The kernel is built the way nixpkgs builds its own: the kernel's arm64
 # defconfig as the base, nixpkgs' common config
 # (pkgs/os-specific/linux/kernel/common-config.nix) as the distribution policy,
-# and this file as the reviewed Gaokun deviation. Everything else -- the other
-# arm64 platforms, the 52-bit VA layout, SELinux being off -- is nixpkgs'
-# decision, inherited rather than restated.
+# this file as the reviewed Gaokun enablement, and gaokun3-minimal.nix as the
+# complement that removes hardware this board cannot have. Everything else --
+# the remaining arm64 options, the 52-bit VA layout, SELinux being off -- is
+# nixpkgs' decision, inherited rather than restated.
 #
 # Keys are kernel_config.nix settings -- tristate / freeform / optional -- not
 # raw CONFIG_ lines.
