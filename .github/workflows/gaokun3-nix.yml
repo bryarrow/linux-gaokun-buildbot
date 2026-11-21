@@ -80,6 +80,12 @@ jobs:
         env:
           CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
         run: |
+          # checks.packages is a linkFarm. A fully cached `nix flake check` can
+          # substitute the linkFarm without materialising the kernel paths its
+          # symlinks point at, so ask for the two outputs explicitly first.
+          nix build --no-link \
+            '.#packages.aarch64-linux.linux-gaokun3' \
+            '.#packages.aarch64-linux.linux-gaokun3.modules'
           ./nix/ci/pin-kernel.sh gaokun3 base-kernel \
             "$(nix eval --raw '.#packages.aarch64-linux.linux-gaokun3.outPath')"
           ./nix/ci/pin-kernel.sh gaokun3 base-modules \
