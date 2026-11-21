@@ -72,6 +72,19 @@ jobs:
         if: github.event_name != 'pull_request'
         run: nix flake check
 
+      # Keep the base kernel and its modules against Cachix's LRU collection.
+      # The pin name is stable and the script adds a revision only when the
+      # store path changed, so three distinct generations survive.
+      - name: Pin the base kernel against cache eviction
+        if: github.event_name != 'pull_request'
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          ./nix/ci/pin-kernel.sh gaokun3 base-kernel \
+            "$(nix eval --raw '.#packages.aarch64-linux.linux-gaokun3.outPath')"
+          ./nix/ci/pin-kernel.sh gaokun3 base-modules \
+            "$(nix eval --raw '.#packages.aarch64-linux.linux-gaokun3.modules.outPath')"
+
   # linux-gaokun3-el2 is a second complete kernel tree, not a rebuild of the
   # base objects. It is excluded from checks.packages so this job can build it
   # concurrently with the base check: wall-clock time is the slower of the two
@@ -101,3 +114,14 @@ jobs:
           nix build --no-link \
             '.#packages.aarch64-linux.linux-gaokun3-el2' \
             '.#packages.aarch64-linux.linux-gaokun3-el2.modules'
+
+      # EL2 modules are the coldest kernel output; without a pin they are the
+      # first thing Cachix evicts when the free 5 GB cache is full.
+      - name: Pin the EL2 kernel against cache eviction
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          ./nix/ci/pin-kernel.sh gaokun3 el2-kernel \
+            "$(nix eval --raw '.#packages.aarch64-linux.linux-gaokun3-el2.outPath')"
+          ./nix/ci/pin-kernel.sh gaokun3 el2-modules \
+            "$(nix eval --raw '.#packages.aarch64-linux.linux-gaokun3-el2.modules.outPath')"
