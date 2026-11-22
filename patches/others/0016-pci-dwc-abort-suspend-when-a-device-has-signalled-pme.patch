@@ -37,14 +37,14 @@ Assisted-by: Claude:claude-opus-5-5
 Origin: local
 Upstream-Status: Pending
 ---
- .../pci/controller/dwc/pcie-designware-host.c | 43 ++++++++++++++++++-
+ drivers/pci/controller/dwc/pcie-designware-host.c | 43 ++++++++++++++++++++++-
  1 file changed, 42 insertions(+), 1 deletion(-)
 
 diff --git a/drivers/pci/controller/dwc/pcie-designware-host.c b/drivers/pci/controller/dwc/pcie-designware-host.c
-index dbcd360bb..4a82418b2 100644
+index 30adfa657..304a0e265 100644
 --- a/drivers/pci/controller/dwc/pcie-designware-host.c
 +++ b/drivers/pci/controller/dwc/pcie-designware-host.c
-@@ -1226,10 +1226,28 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
+@@ -1220,10 +1220,28 @@ static int dw_pcie_pme_turn_off(struct dw_pcie *pci)
  	return 0;
  }
  
@@ -73,8 +73,8 @@ index dbcd360bb..4a82418b2 100644
 +	int ret = 0, rid;
  	u32 val;
  
- 	pci->link_up_at_suspend = dw_pcie_link_up(pci);
-@@ -1239,6 +1257,29 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
+ 	if (!dw_pcie_link_up(pci))
+@@ -1232,6 +1250,29 @@ int dw_pcie_suspend_noirq(struct dw_pcie *pci)
  	if (!pci_host_common_d3cold_possible(pci->pp.bridge, &pme_capable))
  		return 0;
  

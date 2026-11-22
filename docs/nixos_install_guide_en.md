@@ -66,7 +66,7 @@ The console is rotated upright and Plymouth is off, so the kernel log is
 readable. You should see the gaokun3 kernel in it:
 
 ```bash
-uname -r          # 7.2.0-gaokun3
+uname -r          # 7.2.9-gaokun3
 ```
 
 Connect to the network before continuing:
@@ -230,7 +230,7 @@ The entry editor is on, so a kernel command line can be edited at the menu.
 Then check the machine came up the way it should:
 
 ```bash
-uname -r                          # 7.2.0-gaokun3
+uname -r                          # 7.2.9-gaokun3
 cat /proc/device-tree/model       # Huawei MateBook E Go ...
 nmcli device status               # wlP6p1s0 should come up
 bluetoothctl show                 # a per-device address, not 00:00:00:00:5A:AD

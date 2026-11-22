@@ -58,7 +58,7 @@ sudo dd if=result/iso/nixos-gaokun3-*.iso of=/dev/sdX bs=4M status=progress conv
 内核：
 
 ```bash
-uname -r          # 7.2.0-gaokun3
+uname -r          # 7.2.9-gaokun3
 ```
 
 继续之前先联网：
@@ -210,7 +210,7 @@ gaokun3 设备树和硬件命令行。条目编辑器是开着的，所以可以
 进系统后确认一切正常：
 
 ```bash
-uname -r                          # 7.2.0-gaokun3
+uname -r                          # 7.2.9-gaokun3
 cat /proc/device-tree/model       # Huawei MateBook E Go ...
 nmcli device status               # wlP6p1s0 应该起来
 bluetoothctl show                 # 每机地址，不是 00:00:00:00:5A:AD

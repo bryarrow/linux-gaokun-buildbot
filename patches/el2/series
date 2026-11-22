@@ -5,8 +5,6 @@
 0005-soc-qcom-smp2p-Take-over-outgoing-SMEM-items-from-bo.patch
 0006-remoteproc-core-Allow-restarting-detached-remoteproc.patch
 0007-remoteproc-qcom_q6v5-Allow-detecting-detached-state-.patch
-0008-remoteproc-qcom_q6v5-Add-qcom_q6v5_attach.patch
-0009-remoteproc-qcom_q6v5-Send-SMP2P-stop-signal-in-attac.patch
 0010-remoteproc-qcom_q6v5_pas-Attach-running-remoteproc-i.patch
 0011-dt-bindings-firmware-qcom-scm-Add-qcom-shm-bridge-vm.patch
 0012-wip-firmware-qcom-tzmem-Use-self-owner-bits-when-run.patch

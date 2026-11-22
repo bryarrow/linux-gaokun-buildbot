@@ -24,8 +24,8 @@
   hardwareOverride = lib.mkOverride 90;
 in {
   # The kernel's arm64 defconfig carries no LOCALVERSION, and the module
-  # directory is 7.2.0-gaokun3, so this is what modDirVersion is checked
-  # against. The EL2 variant restates it as -gaokun3-el2.
+  # directory is the pinned version plus this, so this is what modDirVersion
+  # is checked against. The EL2 variant restates it as -gaokun3-el2.
   LOCALVERSION = {freeform = "-gaokun3";};
 
   # The kernel's arm64 defconfig leaves Bluetooth LE off. The device pairs BLE

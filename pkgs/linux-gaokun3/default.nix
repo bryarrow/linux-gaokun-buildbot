@@ -68,8 +68,8 @@ in
       # them with `patch -p1`, the same content `git am` applies on the CI side.
       kernelPatches = basePatches ++ (args.kernelPatches or []);
 
-      # kernel.release is "7.2.0" + CONFIG_LOCALVERSION, which the extra config
-      # below sets; the module directory has to match it.
+      # kernel.release is pins.kernelVersion + CONFIG_LOCALVERSION, which the
+      # extra config below sets; the module directory has to match it.
       modDirVersion = "${pins.kernelVersion}${localVersion}";
 
       # The kernel's own arm64 defconfig plus nixpkgs' common config is the
