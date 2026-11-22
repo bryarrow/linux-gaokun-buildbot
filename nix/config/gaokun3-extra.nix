@@ -79,6 +79,13 @@ in {
   # is set; the cmdline entry in the module relies on it.
   FW_DEVLINK_SYNC_STATE_TIMEOUT = {tristate = "y";};
 
+  # The arm64 defconfig makes the QMP PCIe PHY a module; the Android port builds
+  # it in. pcie2a and pcie4 re-init it from qcom_pcie_resume_noirq() before the
+  # NVMe/Wi-Fi link is used, and keeping the PHY's built-in/module shape the
+  # same as Android removes one variable from the resume path.
+  PHY_QCOM_QMP = {tristate = "y";};
+  PHY_QCOM_QMP_PCIE = {tristate = "y";};
+
   # v7.2 guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and the sm8250
   # tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS, while
   # autoModules answers "m" to every tristate question and would re-enable IRIS,

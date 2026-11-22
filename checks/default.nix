@@ -348,6 +348,8 @@ in {
     grep -qx 'CONFIG_USB_PCI=y' "$cfg"
     grep -qx 'CONFIG_BT_LE=y' "$cfg"
     grep -qx 'CONFIG_FW_DEVLINK_SYNC_STATE_TIMEOUT=y' "$cfg"
+    grep -qx 'CONFIG_PHY_QCOM_QMP=y' "$cfg"
+    grep -qx 'CONFIG_PHY_QCOM_QMP_PCIE=y' "$cfg"
     grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
 
     # The crash-log backend is inherited from nixpkgs' common config rather than
