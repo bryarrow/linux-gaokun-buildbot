@@ -121,6 +121,7 @@ The live list. Anything needing hardware evidence goes to the user.
 - **The `-dev` output size needs re-measuring** now that the base enables `DEBUG_INFO`/BTF, both for the cache quota and for CI time.
 - **`gaokun3-tools` has no `meta.license`** and needs a maintainer decision (see the package notes).
 - **Only the S5K3L6 half of the rear camera selector has hardware behind it.** This unit carries the S5K3L6, so the detector reading 0x10, registering `camera@10` and the s5k3l6xx driver binding there is the path a device boot can show; the OV13B10 path (0x36 answering, `camera@36` registered, the ov13b10 driver binding) has no module here to confirm it, and the camss fallback no longer exercises it either — the OV13B10 node is not instantiated at all unless it answers. What a wrong guess costs is a missing rear camera, not a missing front one.
+- **The Gaokun3 SSD needs a two-second wait before the NVMe reset after D3** (`patches/others/0024`). The Android unit's SSD comes back sooner; this unit's controller setup fails if the reset is scheduled immediately after the link returns. If a later kernel changes `nvme_resume()`, retest; the fallback is to keep the NVMe root port out of D3.
 
 ## Rejected alternatives
 
