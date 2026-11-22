@@ -241,9 +241,13 @@ in {
       "clk_ignore_unused"
       "pd_ignore_unused"
       "arm64.nopauth"
+      "iommu.passthrough=0"
+      "iommu.strict=0"
+      "deferred_probe_timeout=10"
+      "fw_devlink.sync_state=timeout"
       "efi=noruntime"
       "fbcon=rotate:1"
-      "usbhid.quirks=0x12d1:0x10b8:0x20000000"
+      "usbhid.quirks=0x12d1:0x10b8:0x21000000"
     ];
   installerProblems =
     lib.optional (installerKernelName != "linux-gaokun3")
@@ -343,6 +347,7 @@ in {
     grep -qx 'CONFIG_CMA_SIZE_MBYTES=128' "$cfg"
     grep -qx 'CONFIG_USB_PCI=y' "$cfg"
     grep -qx 'CONFIG_BT_LE=y' "$cfg"
+    grep -qx 'CONFIG_FW_DEVLINK_SYNC_STATE_TIMEOUT=y' "$cfg"
     grep -qx '# CONFIG_VIDEO_QCOM_IRIS is not set' "$cfg"
 
     # The crash-log backend is inherited from nixpkgs' common config rather than

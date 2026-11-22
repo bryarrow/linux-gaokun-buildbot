@@ -71,6 +71,14 @@ in {
   # boot.initrd.includeDefaultModules stay at its default.
   USB_PCI = {tristate = "y";};
 
+  # The Android port's PWR-10: GCC and GPUCC sync_state wait for every
+  # consumer to probe, and 3d6a000.gmu has no driver, so they wait forever.
+  # The unused GDSCs then stay on and the PCIe GDSCs are never synced, which
+  # is what leaves the NVMe power domain in a state its resume reset cannot
+  # recover from. fw_devlink.sync_state=timeout only exists when this symbol
+  # is set; the cmdline entry in the module relies on it.
+  FW_DEVLINK_SYNC_STATE_TIMEOUT = {tristate = "y";};
+
   # v7.2 guards the Venus IRIS2 resources (VPU_VERSION_IRIS2 and the sm8250
   # tables sc8280xp_res shares) behind !CONFIG_VIDEO_QCOM_IRIS, while
   # autoModules answers "m" to every tristate question and would re-enable IRIS,

@@ -81,9 +81,13 @@
     "clk_ignore_unused"
     "pd_ignore_unused"
     "arm64.nopauth"
+    "iommu.passthrough=0"
+    "iommu.strict=0"
+    "deferred_probe_timeout=10"
+    "fw_devlink.sync_state=timeout"
     "efi=noruntime"
     "fbcon=rotate:1"
-    "usbhid.quirks=0x12d1:0x10b8:0x20000000"
+    "usbhid.quirks=0x12d1:0x10b8:0x21000000"
     "plymouth.enable=0"
   ];
 in {
