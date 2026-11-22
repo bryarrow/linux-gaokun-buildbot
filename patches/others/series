@@ -21,4 +21,3 @@
 0021-cpuidle-psci-wait-after-a-denied-cluster-request-in-s2idle.patch
 0022-pci-add-support-for-pcie-wake-interrupt.patch
 0023-pm-sleep-disarm-wake-irqs-before-resuming-device-irqs.patch
-0024-nvme-wait-after-resume-before-resetting.patch
