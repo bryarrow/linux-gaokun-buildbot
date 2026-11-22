@@ -364,6 +364,29 @@ in {
       };
     };
 
+    # ath11k only keeps the WCN6855 alive in L2 when WoWLAN is armed. The
+    # Android port does it from wpa_supplicant.conf
+    # (wowlan_triggers=disconnect gtk_rekey_failure); NetworkManager's
+    # wpa_supplicant backend does not apply the per-connection
+    # 802-11-wireless.wake-on-wlan flag here, so arm it through cfg80211
+    # before every sleep instead. iw's gtk-rekey-failure is the same trigger
+    # as wpa_supplicant's gtk_rekey_failure.
+    systemd.services.gaokun3-wifi-wow = {
+      description = "Arm the WCN6855 WoWLAN triggers before sleep";
+      wantedBy = ["sleep.target"];
+      before = ["systemd-suspend.service"];
+      serviceConfig = {
+        Type = "oneshot";
+        ExecStart = pkgs.writeShellScript "gaokun3-wifi-wow" ''
+          for phy in /sys/class/ieee80211/phy*; do
+            [ -e "$phy" ] || continue
+            phy=''${phy##*/}
+            ${pkgs.iw}/bin/iw phy "$phy" wowlan enable disconnect gtk-rekey-failure || true
+          done
+        '';
+      };
+    };
+
     environment.sessionVariables.ALSA_CONFIG_UCM2 = "${pkgs.alsa-ucm-conf-gaokun3}";
 
     environment.systemPackages = [tools];
