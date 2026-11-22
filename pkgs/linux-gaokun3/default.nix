@@ -29,6 +29,7 @@
   basePatches =
     series "upstream"
     ++ series "others"
+    ++ series "wifi"
     ++ series "camera"
     ++ series "himax"
     ++ series "media"

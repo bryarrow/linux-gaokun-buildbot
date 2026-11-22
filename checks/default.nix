@@ -17,7 +17,7 @@
 
   # Evaluating this list makes nix/lib/patch-series.nix throw if any series
   # file has drifted from its directory.
-  allSeries = lib.concatMap series ["upstream" "others" "camera" "himax" "media" "el2"];
+  allSeries = lib.concatMap series ["upstream" "others" "wifi" "camera" "himax" "media" "el2"];
 in {
   # The throw in nix/lib/patch-series.nix already fails evaluation; this makes
   # it a named check as well.

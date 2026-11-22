@@ -81,7 +81,6 @@
     "clk_ignore_unused"
     "pd_ignore_unused"
     "arm64.nopauth"
-    "pcie_aspm.policy=powersupersave"
     "efi=noruntime"
     "fbcon=rotate:1"
     "usbhid.quirks=0x12d1:0x10b8:0x20000000"

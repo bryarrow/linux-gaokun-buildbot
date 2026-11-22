@@ -14,3 +14,10 @@
 0014-serial-qcom-geni-add-force-suspend-resume-to-system-sleep-callbacks.patch
 0015-pci-dwc-keep-the-host-up-if-the-link-fails-on-resume.patch
 0016-pci-dwc-abort-suspend-when-a-device-has-signalled-pme.patch
+0017-pci-dwc-retry-a-link-that-doesn-t-come-back-on-resume.patch
+0018-pci-dwc-panic-if-the-link-to-the-nvme-disk-is-lost-on-resume.patch
+0019-nvme-panic-when-a-disk-is-marked-dead.patch
+0020-pci-qcom-resume-the-sc8280xp-controllers-in-parallel.patch
+0021-cpuidle-psci-wait-after-a-denied-cluster-request-in-s2idle.patch
+0022-pci-add-support-for-pcie-wake-interrupt.patch
+0023-pm-sleep-disarm-wake-irqs-before-resuming-device-irqs.patch
