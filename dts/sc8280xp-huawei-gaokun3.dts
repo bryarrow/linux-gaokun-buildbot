@@ -203,6 +203,11 @@
 		pinctrl-0 = <&hastings_reg_en>;
 		pinctrl-names = "default";
 
+		/*
+		 * pcie4 disables its vddpe-3v3 whenever the link goes down, but
+		 * the Wi-Fi firmware keeps running in L2 with WoWLAN armed.
+		 */
+		regulator-always-on;
 		regulator-boot-on;
 	};
 
