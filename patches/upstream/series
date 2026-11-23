@@ -11,3 +11,10 @@
 0022-media-hi846-Add-6MP-and-8MP-modes-support.patch
 0023-media-hi846-fix-modes-handling-for-different-lane-ca.patch
 0024-drm-msm-a6xx-reset-preemption-records-across-suspend.patch
+0025-drm-msm-dsi-phy-7nm-reapply-bonded-pll-init.patch
+0026-drm-msm-fix-barriers-accessing-ctx-vm.patch
+0027-drm-msm-rework-queuelock.patch
+0028-drm-msm-synchronize-vm-creation-on-ctxlock.patch
+0029-drm-msm-gem-validate-lazy-vm-in-gem-new.patch
+0030-drm-msm-allow-lazy-vm-creation-to-fail.patch
+0031-drm-msm-fix-sched-prio-inversion-within-a-ring.patch
